@@ -647,146 +647,160 @@ task.spawn(function()
 end)
 
 --------------------------------------------------
--- DATA PARSING (matches actual remote event format)
+-- DATA PARSING — uses the legacy ["switch",...] array format
+-- found in arg4 of the EVT remote event
 --------------------------------------------------
 
--- Track wild encounter species as they come in via species events
-local wildEncounterSpecies = {}
-local lastBattleSide = nil -- track player's side data
-local battleActive = false
+local function buildLoomianNamesFromBattle(tbl)
+    local names = { enemy = nil, player = nil, enemyStats = nil, playerStats = nil }
+    if type(tbl) ~= "table" then return names end
 
--- Process species discovery events (Events #6-#9 pattern)
--- These fire with arg3={name, disc, scale} and arg5={Species, SeenSpecies}
-local function processSpeciesEvent(args)
-    for i, arg in ipairs(args) do
-        if type(arg) == "table" then
-            -- Check for Species/SeenSpecies pattern (arg5 in the logs)
-            if arg.Species and type(arg.Species) == "string" then
-                local speciesName = arg.Species
-                local seen = arg.SeenSpecies
-                log("SPECIES EVENT: Found species =", speciesName, "| SeenSpecies =", tostring(seen))
-                addSpyLog("Species: " .. speciesName, C.Wild)
+    for i = 1, #tbl do
+        local entry = tbl[i]
+        if type(entry) == "table" and entry[1] == "switch" then
+            local identifier = entry[2]  -- e.g. "1p2a: Cathorn" or "1p1a: Dripple"
+            local infoStr = entry[3]     -- e.g. "Cathorn, L3, F;15/15;0;85/85"
+            local extra = entry[4]       -- table with model info
 
-                -- Record this as a wild encounter species
-                table.insert(wildEncounterSpecies, speciesName)
+            log("  Found 'switch' at index", i, "| id:", tostring(identifier))
 
-                -- Check if rare immediately
-                local rareFound = isRareLoomian(speciesName) or isRareModifier(speciesName)
-                if rareFound then
-                    logWarn("🌟 RARE SPECIES IN ENCOUNTER:", speciesName)
-                    addSpyLog("⭐ RARE: " .. speciesName, C.Gold)
-
-                    -- Update GUI immediately
-                    enemyLbl.Text = 'Enemy: <font color="#FFD700">⭐ ' .. speciesName .. ' (RARE!)</font>'
-                    enemyStatsLbl.Text = ""
-
-                    if currentEnemy ~= speciesName then
-                        currentEnemy = speciesName
-                        playRareSound()
-                        sendNotification("⭐ LumiWare Rare Finder", "RARE SPOTTED: " .. speciesName .. "!", 10)
-                        addRareLog(speciesName, nil)
-                    end
+            -- Try to get the name from extra.model.name or extra.name
+            local rawName = nil
+            if type(extra) == "table" then
+                if type(extra.model) == "table" and type(extra.model.name) == "string" then
+                    rawName = extra.model.name
+                elseif type(extra.name) == "string" then
+                    rawName = extra.name
                 end
-
-                return true -- was a species event
             end
 
-            -- Check for model name pattern (arg3 in the logs: {name, disc, scale})
-            if arg.name and arg.disc and type(arg.name) == "string" then
-                log("MODEL EVENT: name =", arg.name, "| disc =", tostring(arg.disc))
+            -- Fallback: extract name from identifier string (e.g. "1p2a: Cathorn" -> "Cathorn")
+            if not rawName and type(identifier) == "string" then
+                rawName = identifier:match(":%s*(.+)$")
+            end
+
+            if rawName then
+                local displayName = extractLoomianName(rawName)
+                local stats = parseLoomianStats(infoStr)
+
+                log("    rawName:", rawName, "-> display:", displayName)
+                if stats then
+                    log("    stats: Lv." .. tostring(stats.level), stats.gender, "HP " .. tostring(stats.hp) .. "/" .. tostring(stats.maxHP))
+                end
+
+                -- Determine player vs enemy from identifier
+                if identifier and string.find(identifier, "p2") then
+                    names.enemy = displayName
+                    names.enemyStats = stats
+                    log("    -> ENEMY")
+                elseif identifier and string.find(identifier, "p1") then
+                    names.player = displayName
+                    names.playerStats = stats
+                    log("    -> PLAYER")
+                else
+                    -- Fallback: first switch = enemy, second = player
+                    if not names.enemy then
+                        names.enemy = displayName
+                        names.enemyStats = stats
+                    elseif not names.player then
+                        names.player = displayName
+                        names.playerStats = stats
+                    end
+                end
             end
         end
     end
-    return false
+    return names
 end
 
--- Process battle side data (Event #12 pattern)
--- arg5 = {hasRoom, side={id, party={1={name, health, ...}}}, active={health, maxHealth, moves, ...}}
-local function processBattleSideEvent(args)
-    for i, arg in ipairs(args) do
-        if type(arg) == "table" and arg.side and type(arg.side) == "table" then
-            local side = arg.side
-            local sideId = side.id -- "p1" or "p2"
-            local party = side.party
-            local active = arg.active
-
-            log("BATTLE SIDE EVENT: side.id =", tostring(sideId))
-            addSpyLog("Battle side: " .. tostring(sideId), C.Green)
-
-            if sideId == "p1" then
-                -- This is the player's side
-                battleActive = true
-
-                -- Extract player Loomian name from party
-                if type(party) == "table" then
-                    for slot, loomian in pairs(party) do
-                        if type(loomian) == "table" and loomian.name then
-                            local playerName = loomian.name
-                            log("  Player Loomian: name =", playerName, "| active =", tostring(loomian.active))
-
-                            local statsStr = ""
-                            if active and active.health and active.maxHealth then
-                                local hp = math.floor(active.health)
-                                local maxHp = math.floor(active.maxHealth)
-                                local energy = active.energy and math.floor(active.energy) or 0
-                                local maxEnergy = active.maxEnergy and math.floor(active.maxEnergy) or 0
-                                statsStr = string.format("  (HP %d/%d  E %d/%d)", hp, maxHp, energy, maxEnergy)
-                                log("  Player Stats: HP", hp, "/", maxHp, "Energy", energy, "/", maxEnergy)
-                            end
-
-                            playerLbl.Text = "Your Loomian: " .. playerName .. statsStr
-
-                            -- Count as wild encounter
-                            encounterCount = encounterCount + 1
-                            encounterVal.Text = tostring(encounterCount)
-                            log("  Encounter count:", encounterCount)
-                        end
-                    end
-                end
-
-                -- Set battle type to Wild (default, since we see wild encounters most)
-                typeVal.Text = "Wild"
-                typeVal.TextColor3 = C.Wild
-
-                return true
-            elseif sideId == "p2" then
-                -- This is the enemy's side
-                if type(party) == "table" then
-                    for slot, loomian in pairs(party) do
-                        if type(loomian) == "table" and loomian.name then
-                            local enemyName = loomian.name
-                            log("  Enemy Loomian: name =", enemyName)
-
-                            local statsStr = ""
-                            if active and active.health and active.maxHealth then
-                                local hp = math.floor(active.health)
-                                local maxHp = math.floor(active.maxHealth)
-                                statsStr = string.format("Lv.? HP %d/%d", hp, maxHp)
-                                enemyStatsLbl.Text = statsStr
-                            end
-
-                            local rareFound = isRareLoomian(enemyName) or isRareModifier(enemyName)
-                            if rareFound then
-                                enemyLbl.Text = 'Enemy: <font color="#FFD700">⭐ ' .. enemyName .. ' (RARE!)</font>'
-                                if currentEnemy ~= enemyName then
-                                    currentEnemy = enemyName
-                                    logWarn("🌟 RARE LOOMIAN FOUND:", enemyName)
-                                    playRareSound()
-                                    sendNotification("⭐ LumiWare Rare Finder", "RARE SPOTTED: " .. enemyName .. "!", 10)
-                                    addRareLog(enemyName, nil)
-                                end
-                            else
-                                enemyLbl.Text = "Enemy: " .. enemyName
-                                currentEnemy = nil
-                            end
-                        end
-                    end
-                end
-                return true
+local function detectBattleType(tbl)
+    if type(tbl) ~= "table" then return "N/A" end
+    for _, entry in ipairs(tbl) do
+        if type(entry) == "table" and entry[1] == "player" then
+            local tag = entry[3]
+            if type(tag) == "string" then
+                if string.find(tag, "#Wild") then return "Wild"
+                else return "Trainer" end
             end
         end
     end
-    return false
+    return "N/A"
+end
+
+local function processBattleData(tbl)
+    log("=== PROCESSING BATTLE DATA ===")
+    local names = buildLoomianNamesFromBattle(tbl)
+    local enemyName = names.enemy or "Unknown"
+    local playerName = names.player or "Unknown"
+
+    log("Result: Enemy =", enemyName, "| Player =", playerName)
+
+    if enemyName == "Unknown" and playerName == "Unknown" then
+        log("Both unknown, skipping")
+        return
+    end
+
+    -- Battle type
+    battleType = detectBattleType(tbl)
+    log("Battle type:", battleType)
+
+    if battleType == "Wild" then
+        typeVal.Text = "Wild"
+        typeVal.TextColor3 = C.Wild
+    elseif battleType == "Trainer" then
+        typeVal.Text = "Trainer"
+        typeVal.TextColor3 = C.Trainer
+    else
+        typeVal.Text = "N/A"
+        typeVal.TextColor3 = C.TextDim
+    end
+
+    -- Count encounters (wild only)
+    if battleType == "Wild" then
+        encounterCount = encounterCount + 1
+        encounterVal.Text = tostring(encounterCount)
+        log("Encounter count:", encounterCount)
+    end
+
+    -- Rare check
+    local rareFound = isRareLoomian(enemyName) or isRareModifier(enemyName)
+    log("Rare check for '" .. enemyName .. "':", tostring(rareFound))
+
+    if rareFound then
+        enemyLbl.Text = 'Enemy: <font color="#FFD700">⭐ ' .. enemyName .. ' (RARE!)</font>'
+    else
+        enemyLbl.Text = "Enemy: " .. enemyName
+    end
+
+    -- Enemy stats
+    if names.enemyStats then
+        local s = names.enemyStats
+        local g = s.gender == "M" and "♂" or (s.gender == "F" and "♀" or "?")
+        enemyStatsLbl.Text = string.format("Lv.%d  %s  HP %d/%d", s.level or 0, g, s.hp or 0, s.maxHP or 0)
+    else
+        enemyStatsLbl.Text = ""
+    end
+
+    -- Player display
+    playerLbl.Text = "Your Loomian: " .. playerName
+    if names.playerStats then
+        local s = names.playerStats
+        local g = s.gender == "M" and "♂" or (s.gender == "F" and "♀" or "?")
+        playerLbl.Text = playerLbl.Text .. string.format("  (Lv.%d %s HP %d/%d)", s.level or 0, g, s.hp or 0, s.maxHP or 0)
+    end
+
+    -- Alert on rare
+    if rareFound and currentEnemy ~= enemyName then
+        currentEnemy = enemyName
+        logWarn("🌟 RARE LOOMIAN FOUND:", enemyName)
+        playRareSound()
+        sendNotification("⭐ LumiWare Rare Finder", "RARE SPOTTED: " .. enemyName .. "!", 10)
+        local extra = names.enemyStats and ("Lv." .. tostring(names.enemyStats.level)) or nil
+        addRareLog(enemyName, extra)
+    elseif not rareFound then
+        currentEnemy = nil
+    end
+    log("=== END BATTLE PROCESSING ===")
 end
 
 --------------------------------------------------
@@ -830,38 +844,26 @@ local function hookEvent(remote)
             end
         end
 
-        -- === NEW DETECTION LOGIC ===
-
-        -- Detection 1: Species discovery events (arg with Species/SeenSpecies)
-        local wasSpecies = processSpeciesEvent(args)
-
-        -- Detection 2: Battle side data (arg with side.id and party)
-        local wasBattle = processBattleSideEvent(args)
-
-        -- Detection 3: Legacy format fallback (array of arrays with "switch"/"start")
-        if not wasSpecies and not wasBattle then
-            for _, arg in ipairs(args) do
-                if type(arg) == "table" then
-                    local isBattle = false
-                    for _, entry in pairs(arg) do
-                        if type(entry) == "table" and type(entry[1]) == "string" then
-                            local cmd = entry[1]
-                            if cmd == "start" or cmd == "switch" or cmd == "player" or cmd == "turn" then
-                                isBattle = true
-                                break
-                            end
+        -- === BATTLE DETECTION ===
+        -- Scan ALL table args for the battle array format ["switch",...] / ["start"] / ["player",...]
+        for argIdx, arg in ipairs(args) do
+            if type(arg) == "table" then
+                local hasBattleCmd = false
+                for _, entry in pairs(arg) do
+                    if type(entry) == "table" and type(entry[1]) == "string" then
+                        local cmd = entry[1]
+                        if cmd == "start" or cmd == "switch" then
+                            hasBattleCmd = true
+                            break
                         end
                     end
-                    if isBattle then
-                        log(">>> LEGACY BATTLE FORMAT DETECTED <<<")
-                        addSpyLog(">>> LEGACY BATTLE <<<", C.Green)
-                    end
+                end
+                if hasBattleCmd then
+                    log(">>> BATTLE DATA in arg" .. argIdx .. " of", remote.Name, "<<<")
+                    addSpyLog(">>> BATTLE: arg" .. argIdx .. " <<<", C.Green)
+                    processBattleData(arg)
                 end
             end
-        end
-
-        if wasSpecies or wasBattle then
-            log(">>> EVENT PROCESSED SUCCESSFULLY <<<")
         end
     end)
 end
