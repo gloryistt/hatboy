@@ -637,16 +637,125 @@ local function processBattleData(tbl)
 end
 
 --------------------------------------------------
+-- REMOTE SPY / DEBUG LOG PANEL
+--------------------------------------------------
+local spyPanel = Instance.new("Frame", contentFrame)
+spyPanel.Size = UDim2.new(1, 0, 0, 90)
+spyPanel.Position = UDim2.new(0, 0, 0, 356)
+spyPanel.BackgroundColor3 = C.Panel
+spyPanel.BorderSizePixel = 0
+Instance.new("UICorner", spyPanel).CornerRadius = UDim.new(0, 8)
+
+local spyTitle = Instance.new("TextLabel", spyPanel)
+spyTitle.Size = UDim2.new(1, -16, 0, 20)
+spyTitle.Position = UDim2.new(0, 8, 0, 4)
+spyTitle.BackgroundTransparency = 1
+spyTitle.Text = "REMOTE SPY (DEBUG)"
+spyTitle.Font = Enum.Font.GothamBold
+spyTitle.TextSize = 11
+spyTitle.TextColor3 = Color3.fromRGB(255, 100, 100)
+spyTitle.TextXAlignment = Enum.TextXAlignment.Left
+
+local spyScroll = Instance.new("ScrollingFrame", spyPanel)
+spyScroll.Size = UDim2.new(1, -16, 1, -28)
+spyScroll.Position = UDim2.new(0, 8, 0, 24)
+spyScroll.BackgroundTransparency = 1
+spyScroll.ScrollBarThickness = 3
+spyScroll.ScrollBarImageColor3 = Color3.fromRGB(255, 100, 100)
+spyScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+spyScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+
+local spyLayout = Instance.new("UIListLayout", spyScroll)
+spyLayout.SortOrder = Enum.SortOrder.LayoutOrder
+spyLayout.Padding = UDim.new(0, 2)
+
+local spyOrder = 0
+local spyItemCount = 0
+local MAX_SPY_ITEMS = 50
+
+local function addSpyLog(text, color)
+    spyOrder = spyOrder + 1
+    spyItemCount = spyItemCount + 1
+    local item = Instance.new("TextLabel")
+    item.Size = UDim2.new(1, 0, 0, 16)
+    item.BackgroundTransparency = 1
+    item.Text = "[" .. os.date("%X") .. "] " .. text
+    item.Font = Enum.Font.Code
+    item.TextSize = 10
+    item.TextColor3 = color or C.TextDim
+    item.TextXAlignment = Enum.TextXAlignment.Left
+    item.TextTruncate = Enum.TextTruncate.AtEnd
+    item.LayoutOrder = spyOrder
+    item.Parent = spyScroll
+
+    -- Keep log from growing too large
+    if spyItemCount > MAX_SPY_ITEMS then
+        local children = spyScroll:GetChildren()
+        for _, child in ipairs(children) do
+            if child:IsA("TextLabel") then
+                child:Destroy()
+                spyItemCount = spyItemCount - 1
+                break
+            end
+        end
+    end
+end
+
+-- Expand mainFrame to fit the new panel
+mainFrame.Size = UDim2.fromOffset(440, 500)
+fullSize = mainFrame.Size
+
+-- Simple table preview for spy log
+local function tablePreview(tbl, depth)
+    depth = depth or 0
+    if depth > 1 then return "{...}" end
+    local parts = {}
+    local count = 0
+    for k, v in pairs(tbl) do
+        count = count + 1
+        if count > 5 then
+            table.insert(parts, "...")
+            break
+        end
+        local val
+        if type(v) == "table" then
+            val = tablePreview(v, depth + 1)
+        else
+            val = tostring(v)
+        end
+        table.insert(parts, tostring(k) .. "=" .. val)
+    end
+    return "{" .. table.concat(parts, ", ") .. "}"
+end
+
+--------------------------------------------------
 -- REMOTE HOOKING
 --------------------------------------------------
 local hooked = {}
+local hookedCount = 0
+
 local function hookEvent(remote)
     if hooked[remote] then return end
     hooked[remote] = true
+    hookedCount = hookedCount + 1
 
     remote.OnClientEvent:Connect(function(...)
-        for _, arg in ipairs({...}) do
+        local args = {...}
+        -- Log to spy
+        local argPreview = ""
+        for i, arg in ipairs(args) do
             if type(arg) == "table" then
+                argPreview = argPreview .. " arg" .. i .. "=" .. tablePreview(arg)
+            else
+                argPreview = argPreview .. " arg" .. i .. "=" .. tostring(arg)
+            end
+        end
+        addSpyLog(remote.Name .. argPreview, C.TextDim)
+
+        -- Try to detect battle data
+        for _, arg in ipairs(args) do
+            if type(arg) == "table" then
+                -- Method 1: Check for "start" or "switch" entries (array of arrays)
                 local isBattle = false
                 for _, entry in pairs(arg) do
                     if type(entry) == "table" and (entry[1] == "start" or entry[1] == "switch") then
@@ -655,6 +764,7 @@ local function hookEvent(remote)
                     end
                 end
                 if isBattle then
+                    addSpyLog(">>> BATTLE DATA DETECTED <<<", C.Green)
                     processBattleData(arg)
                 end
             end
@@ -662,6 +772,7 @@ local function hookEvent(remote)
     end)
 end
 
+-- Hook everything in ReplicatedStorage
 for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do
     if obj:IsA("RemoteEvent") then hookEvent(obj) end
 end
@@ -669,7 +780,16 @@ ReplicatedStorage.DescendantAdded:Connect(function(obj)
     if obj:IsA("RemoteEvent") then hookEvent(obj) end
 end)
 
+-- Also try hooking remotes in other common locations
+pcall(function()
+    for _, obj in ipairs(game:GetService("Workspace"):GetDescendants()) do
+        if obj:IsA("RemoteEvent") then hookEvent(obj) end
+    end
+end)
+
+addSpyLog("Hooked " .. hookedCount .. " remote events", C.Green)
+
 --------------------------------------------------
 -- STARTUP
 --------------------------------------------------
-sendNotification("⚡ LumiWare v2", "Loaded! Hunting with " .. #RARE_LOOMIANS .. " rare Loomians tracked.", 5)
+sendNotification("⚡ LumiWare v2", "Loaded! Hooked " .. hookedCount .. " remotes, tracking " .. #RARE_LOOMIANS .. " rares.", 5)
