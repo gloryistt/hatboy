@@ -1,7 +1,8 @@
 --------------------------------------------------
--- LUMIWARE V3 — Battle Detection Fix + Webhook
--- ACTUAL FORMAT: EVT fires with arg1="BattleEvent",
--- arg4=table of command arrays using "owm"/"switch"/"player"/"start"
+-- LUMIWARE V3.1 — Battle Detection Fix
+-- FORMAT: EVT(arg1="BattleEvent", arg2=sessionID,
+--   arg3=subCmd, arg4=commandTable)
+-- Commands: "owm"/"switch"/"player"/"start"
 --------------------------------------------------
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -16,26 +17,22 @@ local player = Players.LocalPlayer
 local PLAYER_NAME = player.Name
 
 --------------------------------------------------
--- STRUCTURED LOGGING
+-- LOGGING
 --------------------------------------------------
-local LOG_LEVELS = { HOOK = "🔗", BATTLE = "⚔️", RARE = "⭐", INFO = "ℹ️", WARN = "⚠️", WEBHOOK = "📡", DEBUG = "🔍", EVT = "📦" }
 local VERBOSE_MODE = false
 
 local function log(category, ...)
-    local prefix = "[LumiWare][" .. (LOG_LEVELS[category] or "?") .. " " .. category .. "]"
-    print(prefix, ...)
+    print("[LumiWare][" .. category .. "]", ...)
 end
 
 local function logDebug(...)
-    if VERBOSE_MODE then
-        log("DEBUG", ...)
-    end
+    if VERBOSE_MODE then log("DEBUG", ...) end
 end
 
-log("INFO", "Initializing LumiWare v3 for player:", PLAYER_NAME)
+log("INFO", "Initializing LumiWare v3.1 for:", PLAYER_NAME)
 
 --------------------------------------------------
--- RARE LOOMIANS DB
+-- RARE LOOMIANS
 --------------------------------------------------
 local RARE_LOOMIANS = {
     "Duskit", "Ikazune", "Mutagon", "Protogon", "Metronette", "Wabalisc",
@@ -44,7 +41,6 @@ local RARE_LOOMIANS = {
     "Vambat", "Weevolt", "Nevermare",
     "Akhalos", "Odasho", "Cosmiore", "Armenti"
 }
-
 local customRares = {}
 
 local function isRareModifier(name)
@@ -65,22 +61,18 @@ end
 
 local function sendNotification(title, text, duration)
     pcall(function()
-        StarterGui:SetCore("SendNotification", {
-            Title = title,
-            Text = text,
-            Duration = duration or 5
-        })
+        StarterGui:SetCore("SendNotification", { Title = title, Text = text, Duration = duration or 5 })
     end)
 end
 
 local function playRareSound()
     pcall(function()
-        local sound = Instance.new("Sound")
-        sound.SoundId = "rbxassetid://6518811702"
-        sound.Volume = 1
-        sound.Parent = SoundService
-        sound:Play()
-        task.delay(3, function() sound:Destroy() end)
+        local s = Instance.new("Sound")
+        s.SoundId = "rbxassetid://6518811702"
+        s.Volume = 1
+        s.Parent = SoundService
+        s:Play()
+        task.delay(3, function() s:Destroy() end)
     end)
 end
 
@@ -92,54 +84,41 @@ local webhookUrl = ""
 local function sendWebhook(embedData)
     if webhookUrl == "" then return end
     pcall(function()
-        local payload = HttpService:JSONEncode({
-            username = "LumiWare",
-            embeds = { embedData }
-        })
+        local payload = HttpService:JSONEncode({ username = "LumiWare", embeds = { embedData } })
         local httpFunc = (syn and syn.request) or (http and http.request) or request or http_request
         if httpFunc then
-            httpFunc({
-                Url = webhookUrl,
-                Method = "POST",
-                Headers = { ["Content-Type"] = "application/json" },
-                Body = payload
-            })
-            log("WEBHOOK", "Sent:", embedData.title or "untitled")
-        else
-            log("WARN", "No HTTP function available for webhooks")
+            httpFunc({ Url = webhookUrl, Method = "POST", Headers = { ["Content-Type"] = "application/json" }, Body = payload })
         end
     end)
 end
 
-local function sendRareWebhook(loomianName, level, gender, encCount, huntTime)
+local function sendRareWebhook(name, level, gender, enc, huntTime)
     sendWebhook({
-        title = "⭐ RARE LOOMIAN FOUND!",
-        description = "**" .. loomianName .. "** has been detected!",
+        title = "⭐ RARE LOOMIAN FOUND!", description = "**" .. name .. "** detected!",
         color = 16766720,
         fields = {
-            { name = "Loomian", value = loomianName, inline = true },
+            { name = "Loomian", value = name, inline = true },
             { name = "Level", value = tostring(level or "?"), inline = true },
             { name = "Gender", value = gender or "?", inline = true },
-            { name = "Encounters", value = tostring(encCount), inline = true },
+            { name = "Encounters", value = tostring(enc), inline = true },
             { name = "Hunt Time", value = huntTime or "?", inline = true },
             { name = "Player", value = PLAYER_NAME, inline = true },
         },
-        footer = { text = "LumiWare v3 • " .. os.date("%X") },
+        footer = { text = "LumiWare v3.1 • " .. os.date("%X") },
     })
 end
 
-local function sendSessionWebhook(encCount, huntTime, raresFound)
+local function sendSessionWebhook(enc, huntTime, rares)
     sendWebhook({
-        title = "📊 Session Summary",
-        description = "LumiWare hunting session update",
+        title = "📊 Session Summary", description = "LumiWare session update",
         color = 7930367,
         fields = {
-            { name = "Total Encounters", value = tostring(encCount), inline = true },
+            { name = "Encounters", value = tostring(enc), inline = true },
             { name = "Hunt Time", value = huntTime, inline = true },
-            { name = "Rares Found", value = tostring(raresFound), inline = true },
+            { name = "Rares", value = tostring(rares), inline = true },
             { name = "Player", value = PLAYER_NAME, inline = true },
         },
-        footer = { text = "LumiWare v3 • " .. os.date("%X") },
+        footer = { text = "LumiWare v3.1 • " .. os.date("%X") },
     })
 end
 
@@ -150,14 +129,12 @@ local encounterCount = 0
 local huntStartTime = tick()
 local currentEnemy = nil
 local isMinimized = false
-local battleType = "N/A"
 local battleState = "idle"
 local lastBattleTick = 0
 local raresFoundCount = 0
 local encounterHistory = {}
 local discoveryMode = false
 
--- Battle accumulator
 local currentBattle = {
     active = false,
     enemy = nil,
@@ -170,13 +147,9 @@ local currentBattle = {
 
 local function resetBattle()
     currentBattle = {
-        active = false,
-        enemy = nil,
-        player = nil,
-        enemyStats = nil,
-        playerStats = nil,
-        battleType = "N/A",
-        enemyProcessed = false,
+        active = false, enemy = nil, player = nil,
+        enemyStats = nil, playerStats = nil,
+        battleType = "N/A", enemyProcessed = false,
     }
 end
 
@@ -192,52 +165,38 @@ end
 
 local function parseLoomianStats(infoStr)
     if type(infoStr) ~= "string" then return nil end
-    -- Format: "Dripple, L13, M;41/44;0.008547;117/117"
     local name, level, rest = infoStr:match("^(.+), L(%d+), (.+)$")
     if not level then return nil end
     local gender = rest and rest:match("^(%a)") or "?"
     local hp, maxHP = rest and rest:match("(%d+)/(%d+)") or nil, nil
-    return {
-        name = name,
-        level = tonumber(level),
-        gender = gender,
-        hp = tonumber(hp),
-        maxHP = tonumber(maxHP)
-    }
+    return { name = name, level = tonumber(level), gender = gender, hp = tonumber(hp), maxHP = tonumber(maxHP) }
 end
 
 local function formatTime(seconds)
     local h = math.floor(seconds / 3600)
     local m = math.floor((seconds % 3600) / 60)
     local s = math.floor(seconds % 60)
-    if h > 0 then
-        return string.format("%dh %02dm %02ds", h, m, s)
-    else
-        return string.format("%dm %02ds", m, s)
-    end
+    if h > 0 then return string.format("%dh %02dm %02ds", h, m, s)
+    else return string.format("%dm %02ds", m, s) end
 end
 
 local function tablePreview(tbl, depth)
     depth = depth or 0
     if depth > 2 then return "{...}" end
-    local parts = {}
-    local count = 0
+    local parts, count = {}, 0
     for k, v in pairs(tbl) do
         count = count + 1
         if count > 6 then table.insert(parts, "...") break end
-        local val
-        if type(v) == "table" then val = tablePreview(v, depth + 1)
-        else val = tostring(v) end
-        table.insert(parts, tostring(k) .. "=" .. val)
+        if type(v) == "table" then table.insert(parts, tostring(k) .. "=" .. tablePreview(v, depth + 1))
+        else table.insert(parts, tostring(k) .. "=" .. tostring(v)) end
     end
     return "{" .. table.concat(parts, ", ") .. "}"
 end
 
 --------------------------------------------------
--- GUI: CLEANUP OLD
+-- GUI CLEANUP
 --------------------------------------------------
 local guiName = "LumiWare_Hub_" .. tostring(math.random(1000, 9999))
-
 for _, v in pairs(player:WaitForChild("PlayerGui"):GetChildren()) do
     if string.find(v.Name, "LumiWare_Hub") or v.Name == "BattleLoomianViewer" then v:Destroy() end
 end
@@ -258,21 +217,14 @@ if not ok then gui.Parent = player:WaitForChild("PlayerGui") end
 -- THEME
 --------------------------------------------------
 local C = {
-    BG        = Color3.fromRGB(16, 16, 22),
-    TopBar    = Color3.fromRGB(24, 24, 34),
-    Accent    = Color3.fromRGB(120, 80, 255),
-    AccentDim = Color3.fromRGB(80, 50, 180),
-    Text      = Color3.fromRGB(240, 240, 245),
-    TextDim   = Color3.fromRGB(160, 160, 175),
-    Panel     = Color3.fromRGB(22, 22, 30),
-    PanelAlt  = Color3.fromRGB(28, 28, 38),
-    Gold      = Color3.fromRGB(255, 215, 0),
-    Green     = Color3.fromRGB(80, 220, 120),
-    Red       = Color3.fromRGB(255, 80, 80),
-    Wild      = Color3.fromRGB(80, 200, 255),
-    Trainer   = Color3.fromRGB(255, 160, 60),
-    Orange    = Color3.fromRGB(255, 160, 60),
-    Cyan      = Color3.fromRGB(80, 200, 255),
+    BG = Color3.fromRGB(16, 16, 22), TopBar = Color3.fromRGB(24, 24, 34),
+    Accent = Color3.fromRGB(120, 80, 255), AccentDim = Color3.fromRGB(80, 50, 180),
+    Text = Color3.fromRGB(240, 240, 245), TextDim = Color3.fromRGB(160, 160, 175),
+    Panel = Color3.fromRGB(22, 22, 30), PanelAlt = Color3.fromRGB(28, 28, 38),
+    Gold = Color3.fromRGB(255, 215, 0), Green = Color3.fromRGB(80, 220, 120),
+    Red = Color3.fromRGB(255, 80, 80), Wild = Color3.fromRGB(80, 200, 255),
+    Trainer = Color3.fromRGB(255, 160, 60), Orange = Color3.fromRGB(255, 160, 60),
+    Cyan = Color3.fromRGB(80, 200, 255),
 }
 
 --------------------------------------------------
@@ -287,7 +239,6 @@ mainFrame.BorderSizePixel = 0
 mainFrame.ClipsDescendants = true
 mainFrame.Parent = gui
 Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 10)
-
 local stroke = Instance.new("UIStroke", mainFrame)
 stroke.Color = C.Accent
 stroke.Thickness = 1.5
@@ -299,7 +250,6 @@ topbar.Size = UDim2.new(1, 0, 0, 36)
 topbar.BackgroundColor3 = C.TopBar
 topbar.BorderSizePixel = 0
 Instance.new("UICorner", topbar).CornerRadius = UDim.new(0, 10)
-
 local topFill = Instance.new("Frame", topbar)
 topFill.Size = UDim2.new(1, 0, 0, 10)
 topFill.Position = UDim2.new(0, 0, 1, -10)
@@ -310,7 +260,7 @@ local titleLbl = Instance.new("TextLabel", topbar)
 titleLbl.Size = UDim2.new(1, -80, 1, 0)
 titleLbl.Position = UDim2.new(0, 12, 0, 0)
 titleLbl.BackgroundTransparency = 1
-titleLbl.Text = "⚡ LumiWare v3"
+titleLbl.Text = "⚡ LumiWare v3.1"
 titleLbl.Font = Enum.Font.GothamBold
 titleLbl.TextSize = 15
 titleLbl.TextColor3 = C.Accent
@@ -348,29 +298,21 @@ end)
 local dragging, dragInput, dragStart, startPos
 topbar.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-        dragging = true
-        dragStart = input.Position
-        startPos = mainFrame.Position
-        input.Changed:Connect(function()
-            if input.UserInputState == Enum.UserInputState.End then dragging = false end
-        end)
+        dragging = true; dragStart = input.Position; startPos = mainFrame.Position
+        input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then dragging = false end end)
     end
 end)
 topbar.InputChanged:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
-        dragInput = input
-    end
+    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then dragInput = input end
 end)
 UserInputService.InputChanged:Connect(function(input)
     if input == dragInput and dragging then
-        local delta = input.Position - dragStart
-        mainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        local d = input.Position - dragStart
+        mainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
     end
 end)
 
---------------------------------------------------
 -- CONTENT
---------------------------------------------------
 local contentFrame = Instance.new("Frame", mainFrame)
 contentFrame.Name = "Content"
 contentFrame.Size = UDim2.new(1, -16, 1, -44)
@@ -383,7 +325,6 @@ statsBar.Size = UDim2.new(1, 0, 0, 50)
 statsBar.BackgroundColor3 = C.Panel
 statsBar.BorderSizePixel = 0
 Instance.new("UICorner", statsBar).CornerRadius = UDim.new(0, 8)
-
 local statsLayout = Instance.new("UIListLayout", statsBar)
 statsLayout.FillDirection = Enum.FillDirection.Horizontal
 statsLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
@@ -430,8 +371,8 @@ encounterPanel.BackgroundColor3 = C.Panel
 encounterPanel.BorderSizePixel = 0
 Instance.new("UICorner", encounterPanel).CornerRadius = UDim.new(0, 8)
 
-local encTitle = Instance.new("TextLabel", encounterPanel)
-encTitle.Size = UDim2.new(1, -16, 0, 24)
+Instance.new("TextLabel", encounterPanel).Size = UDim2.new(1, -16, 0, 24)
+local encTitle = encounterPanel:FindFirstChildOfClass("TextLabel")
 encTitle.Position = UDim2.new(0, 8, 0, 4)
 encTitle.BackgroundTransparency = 1
 encTitle.Text = "CURRENT ENCOUNTER"
@@ -478,7 +419,6 @@ logPanel.Position = UDim2.new(0, 0, 0, 152)
 logPanel.BackgroundColor3 = C.Panel
 logPanel.BorderSizePixel = 0
 Instance.new("UICorner", logPanel).CornerRadius = UDim.new(0, 8)
-
 local logTitle = Instance.new("TextLabel", logPanel)
 logTitle.Size = UDim2.new(1, -16, 0, 24)
 logTitle.Position = UDim2.new(0, 8, 0, 4)
@@ -497,7 +437,6 @@ rareScroll.ScrollBarThickness = 3
 rareScroll.ScrollBarImageColor3 = C.Accent
 rareScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
 rareScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-
 local logLayout = Instance.new("UIListLayout", rareScroll)
 logLayout.SortOrder = Enum.SortOrder.LayoutOrder
 logLayout.Padding = UDim.new(0, 3)
@@ -517,23 +456,22 @@ local function addRareLog(name, extraInfo)
     item.Parent = rareScroll
 end
 
--- CUSTOM RARE LIST
+-- CUSTOM RARE
 local customPanel = Instance.new("Frame", contentFrame)
 customPanel.Size = UDim2.new(1, 0, 0, 56)
 customPanel.Position = UDim2.new(0, 0, 0, 238)
 customPanel.BackgroundColor3 = C.Panel
 customPanel.BorderSizePixel = 0
 Instance.new("UICorner", customPanel).CornerRadius = UDim.new(0, 8)
-
-local customTitle = Instance.new("TextLabel", customPanel)
-customTitle.Size = UDim2.new(1, -16, 0, 20)
-customTitle.Position = UDim2.new(0, 8, 0, 4)
-customTitle.BackgroundTransparency = 1
-customTitle.Text = "CUSTOM RARE LIST"
-customTitle.Font = Enum.Font.GothamBold
-customTitle.TextSize = 11
-customTitle.TextColor3 = C.Accent
-customTitle.TextXAlignment = Enum.TextXAlignment.Left
+local ct = Instance.new("TextLabel", customPanel)
+ct.Size = UDim2.new(1, -16, 0, 20)
+ct.Position = UDim2.new(0, 8, 0, 4)
+ct.BackgroundTransparency = 1
+ct.Text = "CUSTOM RARE LIST"
+ct.Font = Enum.Font.GothamBold
+ct.TextSize = 11
+ct.TextColor3 = C.Accent
+ct.TextXAlignment = Enum.TextXAlignment.Left
 
 local customInput = Instance.new("TextBox", customPanel)
 customInput.Size = UDim2.new(1, -90, 0, 26)
@@ -578,102 +516,92 @@ addBtn.MouseButton1Click:Connect(function()
     if input == "" then return end
     for word in input:gmatch("[^,]+") do
         local trimmed = word:match("^%s*(.-)%s*$")
-        if trimmed and trimmed ~= "" then
-            table.insert(customRares, trimmed)
-        end
+        if trimmed and trimmed ~= "" then table.insert(customRares, trimmed) end
     end
     customInput.Text = ""
     sendNotification("LumiWare", "Added to custom rare list!", 3)
 end)
-
 clearBtn.MouseButton1Click:Connect(function()
     customRares = {}
     sendNotification("LumiWare", "Custom rare list cleared.", 3)
 end)
 
 -- WEBHOOK CONFIG
-local webhookPanel = Instance.new("Frame", contentFrame)
-webhookPanel.Size = UDim2.new(1, 0, 0, 56)
-webhookPanel.Position = UDim2.new(0, 0, 0, 300)
-webhookPanel.BackgroundColor3 = C.Panel
-webhookPanel.BorderSizePixel = 0
-Instance.new("UICorner", webhookPanel).CornerRadius = UDim.new(0, 8)
+local whPanel = Instance.new("Frame", contentFrame)
+whPanel.Size = UDim2.new(1, 0, 0, 56)
+whPanel.Position = UDim2.new(0, 0, 0, 300)
+whPanel.BackgroundColor3 = C.Panel
+whPanel.BorderSizePixel = 0
+Instance.new("UICorner", whPanel).CornerRadius = UDim.new(0, 8)
+local wt = Instance.new("TextLabel", whPanel)
+wt.Size = UDim2.new(1, -16, 0, 20)
+wt.Position = UDim2.new(0, 8, 0, 4)
+wt.BackgroundTransparency = 1
+wt.Text = "📡 DISCORD WEBHOOK"
+wt.Font = Enum.Font.GothamBold
+wt.TextSize = 11
+wt.TextColor3 = C.Cyan
+wt.TextXAlignment = Enum.TextXAlignment.Left
 
-local webhookTitle = Instance.new("TextLabel", webhookPanel)
-webhookTitle.Size = UDim2.new(1, -16, 0, 20)
-webhookTitle.Position = UDim2.new(0, 8, 0, 4)
-webhookTitle.BackgroundTransparency = 1
-webhookTitle.Text = "📡 DISCORD WEBHOOK"
-webhookTitle.Font = Enum.Font.GothamBold
-webhookTitle.TextSize = 11
-webhookTitle.TextColor3 = C.Cyan
-webhookTitle.TextXAlignment = Enum.TextXAlignment.Left
+local whInput = Instance.new("TextBox", whPanel)
+whInput.Size = UDim2.new(1, -60, 0, 26)
+whInput.Position = UDim2.new(0, 8, 0, 26)
+whInput.BackgroundColor3 = C.PanelAlt
+whInput.BorderSizePixel = 0
+whInput.PlaceholderText = "Paste webhook URL..."
+whInput.PlaceholderColor3 = Color3.fromRGB(100, 100, 110)
+whInput.Text = ""
+whInput.Font = Enum.Font.Gotham
+whInput.TextSize = 11
+whInput.TextColor3 = C.Text
+whInput.ClearTextOnFocus = false
+whInput.TextXAlignment = Enum.TextXAlignment.Left
+Instance.new("UICorner", whInput).CornerRadius = UDim.new(0, 5)
+Instance.new("UIPadding", whInput).PaddingLeft = UDim.new(0, 6)
 
-local webhookInput = Instance.new("TextBox", webhookPanel)
-webhookInput.Size = UDim2.new(1, -60, 0, 26)
-webhookInput.Position = UDim2.new(0, 8, 0, 26)
-webhookInput.BackgroundColor3 = C.PanelAlt
-webhookInput.BorderSizePixel = 0
-webhookInput.PlaceholderText = "Paste webhook URL here..."
-webhookInput.PlaceholderColor3 = Color3.fromRGB(100, 100, 110)
-webhookInput.Text = ""
-webhookInput.Font = Enum.Font.Gotham
-webhookInput.TextSize = 11
-webhookInput.TextColor3 = C.Text
-webhookInput.ClearTextOnFocus = false
-webhookInput.TextXAlignment = Enum.TextXAlignment.Left
-Instance.new("UICorner", webhookInput).CornerRadius = UDim.new(0, 5)
-Instance.new("UIPadding", webhookInput).PaddingLeft = UDim.new(0, 6)
+local whSave = Instance.new("TextButton", whPanel)
+whSave.Size = UDim2.fromOffset(42, 26)
+whSave.Position = UDim2.new(1, -50, 0, 26)
+whSave.BackgroundColor3 = C.Cyan
+whSave.Text = "SET"
+whSave.Font = Enum.Font.GothamBold
+whSave.TextSize = 11
+whSave.TextColor3 = C.BG
+whSave.BorderSizePixel = 0
+Instance.new("UICorner", whSave).CornerRadius = UDim.new(0, 5)
 
-local webhookSaveBtn = Instance.new("TextButton", webhookPanel)
-webhookSaveBtn.Size = UDim2.fromOffset(42, 26)
-webhookSaveBtn.Position = UDim2.new(1, -50, 0, 26)
-webhookSaveBtn.BackgroundColor3 = C.Cyan
-webhookSaveBtn.Text = "SET"
-webhookSaveBtn.Font = Enum.Font.GothamBold
-webhookSaveBtn.TextSize = 11
-webhookSaveBtn.TextColor3 = C.BG
-webhookSaveBtn.BorderSizePixel = 0
-Instance.new("UICorner", webhookSaveBtn).CornerRadius = UDim.new(0, 5)
-
-webhookSaveBtn.MouseButton1Click:Connect(function()
-    webhookUrl = webhookInput.Text
+whSave.MouseButton1Click:Connect(function()
+    webhookUrl = whInput.Text
     if webhookUrl ~= "" then
-        sendNotification("LumiWare", "Webhook URL saved!", 3)
+        sendNotification("LumiWare", "Webhook saved!", 3)
         sendWebhook({
-            title = "✅ Webhook Connected!",
-            description = "LumiWare v3 is now sending alerts.",
-            color = 5763719,
-            fields = {
-                { name = "Player", value = PLAYER_NAME, inline = true },
-                { name = "Rares Tracked", value = tostring(#RARE_LOOMIANS + #customRares), inline = true },
-            },
-            footer = { text = "LumiWare v3 • " .. os.date("%X") },
+            title = "✅ Webhook Connected!", color = 5763719,
+            fields = { { name = "Player", value = PLAYER_NAME, inline = true } },
+            footer = { text = "LumiWare v3.1" },
         })
     else
-        sendNotification("LumiWare", "Webhook URL cleared.", 3)
+        sendNotification("LumiWare", "Webhook cleared.", 3)
     end
 end)
 
 -- BATTLE LOG
-local battleLogPanel = Instance.new("Frame", contentFrame)
-battleLogPanel.Size = UDim2.new(1, 0, 0, 100)
-battleLogPanel.Position = UDim2.new(0, 0, 0, 362)
-battleLogPanel.BackgroundColor3 = C.Panel
-battleLogPanel.BorderSizePixel = 0
-Instance.new("UICorner", battleLogPanel).CornerRadius = UDim.new(0, 8)
+local blPanel = Instance.new("Frame", contentFrame)
+blPanel.Size = UDim2.new(1, 0, 0, 100)
+blPanel.Position = UDim2.new(0, 0, 0, 362)
+blPanel.BackgroundColor3 = C.Panel
+blPanel.BorderSizePixel = 0
+Instance.new("UICorner", blPanel).CornerRadius = UDim.new(0, 8)
+local blt = Instance.new("TextLabel", blPanel)
+blt.Size = UDim2.new(1, -16, 0, 20)
+blt.Position = UDim2.new(0, 8, 0, 4)
+blt.BackgroundTransparency = 1
+blt.Text = "⚔️ BATTLE LOG"
+blt.Font = Enum.Font.GothamBold
+blt.TextSize = 11
+blt.TextColor3 = C.Green
+blt.TextXAlignment = Enum.TextXAlignment.Left
 
-local battleLogTitle = Instance.new("TextLabel", battleLogPanel)
-battleLogTitle.Size = UDim2.new(1, -16, 0, 20)
-battleLogTitle.Position = UDim2.new(0, 8, 0, 4)
-battleLogTitle.BackgroundTransparency = 1
-battleLogTitle.Text = "⚔️ BATTLE LOG"
-battleLogTitle.Font = Enum.Font.GothamBold
-battleLogTitle.TextSize = 11
-battleLogTitle.TextColor3 = C.Green
-battleLogTitle.TextXAlignment = Enum.TextXAlignment.Left
-
-local battleScroll = Instance.new("ScrollingFrame", battleLogPanel)
+local battleScroll = Instance.new("ScrollingFrame", blPanel)
 battleScroll.Size = UDim2.new(1, -16, 1, -28)
 battleScroll.Position = UDim2.new(0, 8, 0, 24)
 battleScroll.BackgroundTransparency = 1
@@ -681,17 +609,14 @@ battleScroll.ScrollBarThickness = 3
 battleScroll.ScrollBarImageColor3 = C.Green
 battleScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
 battleScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+local bll = Instance.new("UIListLayout", battleScroll)
+bll.SortOrder = Enum.SortOrder.LayoutOrder
+bll.Padding = UDim.new(0, 2)
 
-local battleLogLayout = Instance.new("UIListLayout", battleScroll)
-battleLogLayout.SortOrder = Enum.SortOrder.LayoutOrder
-battleLogLayout.Padding = UDim.new(0, 2)
-
-local battleLogOrder = 0
-local battleLogItemCount = 0
-
+local blOrder, blCount = 0, 0
 local function addBattleLog(text, color)
-    battleLogOrder = battleLogOrder + 1
-    battleLogItemCount = battleLogItemCount + 1
+    blOrder = blOrder + 1
+    blCount = blCount + 1
     local item = Instance.new("TextLabel")
     item.Size = UDim2.new(1, 0, 0, 16)
     item.BackgroundTransparency = 1
@@ -701,85 +626,65 @@ local function addBattleLog(text, color)
     item.TextColor3 = color or C.TextDim
     item.TextXAlignment = Enum.TextXAlignment.Left
     item.TextTruncate = Enum.TextTruncate.AtEnd
-    item.LayoutOrder = battleLogOrder
+    item.LayoutOrder = blOrder
     item.Parent = battleScroll
-
-    if battleLogItemCount > 40 then
-        for _, child in ipairs(battleScroll:GetChildren()) do
-            if child:IsA("TextLabel") then
-                child:Destroy()
-                battleLogItemCount = battleLogItemCount - 1
-                break
-            end
+    if blCount > 40 then
+        for _, ch in ipairs(battleScroll:GetChildren()) do
+            if ch:IsA("TextLabel") then ch:Destroy() blCount = blCount - 1 break end
         end
     end
 end
 
 -- CONTROLS
-local controlsPanel = Instance.new("Frame", contentFrame)
-controlsPanel.Size = UDim2.new(1, 0, 0, 36)
-controlsPanel.Position = UDim2.new(0, 0, 0, 468)
-controlsPanel.BackgroundColor3 = C.Panel
-controlsPanel.BorderSizePixel = 0
-Instance.new("UICorner", controlsPanel).CornerRadius = UDim.new(0, 8)
+local ctrlPanel = Instance.new("Frame", contentFrame)
+ctrlPanel.Size = UDim2.new(1, 0, 0, 36)
+ctrlPanel.Position = UDim2.new(0, 0, 0, 468)
+ctrlPanel.BackgroundColor3 = C.Panel
+ctrlPanel.BorderSizePixel = 0
+Instance.new("UICorner", ctrlPanel).CornerRadius = UDim.new(0, 8)
+local cl = Instance.new("UIListLayout", ctrlPanel)
+cl.FillDirection = Enum.FillDirection.Horizontal
+cl.HorizontalAlignment = Enum.HorizontalAlignment.Center
+cl.VerticalAlignment = Enum.VerticalAlignment.Center
+cl.Padding = UDim.new(0, 6)
 
-local controlsLayout = Instance.new("UIListLayout", controlsPanel)
-controlsLayout.FillDirection = Enum.FillDirection.Horizontal
-controlsLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
-controlsLayout.VerticalAlignment = Enum.VerticalAlignment.Center
-controlsLayout.Padding = UDim.new(0, 6)
-
-local function makeToggleBtn(parent, text, onColor, offColor)
-    local btn = Instance.new("TextButton", parent)
-    btn.Size = UDim2.new(0.3, -6, 0, 26)
-    btn.BackgroundColor3 = offColor
-    btn.Text = text
-    btn.Font = Enum.Font.GothamBold
-    btn.TextSize = 10
-    btn.TextColor3 = C.Text
-    btn.BorderSizePixel = 0
-    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 5)
-    return btn
+local function mkBtn(parent, text)
+    local b = Instance.new("TextButton", parent)
+    b.Size = UDim2.new(0.3, -6, 0, 26)
+    b.BackgroundColor3 = C.AccentDim
+    b.Text = text
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 10
+    b.TextColor3 = C.Text
+    b.BorderSizePixel = 0
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 5)
+    return b
 end
 
-local resetBtn = makeToggleBtn(controlsPanel, "🔄 RESET", C.Green, C.AccentDim)
-local discoveryBtn = makeToggleBtn(controlsPanel, "🔍 DISCOVERY", C.Orange, C.AccentDim)
-local verboseBtn = makeToggleBtn(controlsPanel, "📝 VERBOSE", C.Orange, C.AccentDim)
+local resetBtn = mkBtn(ctrlPanel, "🔄 RESET")
+local discoveryBtn = mkBtn(ctrlPanel, "🔍 DISCOVERY")
+local verboseBtn = mkBtn(ctrlPanel, "📝 VERBOSE")
 
 resetBtn.MouseButton1Click:Connect(function()
-    encounterCount = 0
-    huntStartTime = tick()
-    raresFoundCount = 0
-    encounterHistory = {}
-    currentEnemy = nil
-    resetBattle()
-    encounterVal.Text = "0"
-    epmVal.Text = "0.0"
-    timerVal.Text = "0m 00s"
-    typeVal.Text = "N/A"
-    typeVal.TextColor3 = C.TextDim
-    stateVal.Text = "Idle"
-    stateVal.TextColor3 = C.TextDim
+    encounterCount = 0; huntStartTime = tick(); raresFoundCount = 0
+    encounterHistory = {}; currentEnemy = nil; resetBattle()
+    encounterVal.Text = "0"; epmVal.Text = "0.0"; timerVal.Text = "0m 00s"
+    typeVal.Text = "N/A"; typeVal.TextColor3 = C.TextDim
+    stateVal.Text = "Idle"; stateVal.TextColor3 = C.TextDim
     enemyLbl.Text = "Enemy: Waiting for battle..."
-    enemyStatsLbl.Text = ""
-    playerLbl.Text = "Your Loomian: —"
+    enemyStatsLbl.Text = ""; playerLbl.Text = "Your Loomian: —"
     addBattleLog("Session reset", C.Accent)
-    sendNotification("LumiWare", "Session stats reset!", 3)
 end)
-
 discoveryBtn.MouseButton1Click:Connect(function()
     discoveryMode = not discoveryMode
     discoveryBtn.BackgroundColor3 = discoveryMode and C.Orange or C.AccentDim
     discoveryBtn.Text = discoveryMode and "🔍 DISC: ON" or "🔍 DISCOVERY"
     addBattleLog("Discovery: " .. tostring(discoveryMode), C.Orange)
-    sendNotification("LumiWare", discoveryMode and "Discovery mode ON" or "Discovery mode OFF", 3)
 end)
-
 verboseBtn.MouseButton1Click:Connect(function()
     VERBOSE_MODE = not VERBOSE_MODE
     verboseBtn.BackgroundColor3 = VERBOSE_MODE and C.Orange or C.AccentDim
     verboseBtn.Text = VERBOSE_MODE and "📝 VERB: ON" or "📝 VERBOSE"
-    sendNotification("LumiWare", VERBOSE_MODE and "Verbose ON" or "Verbose OFF", 3)
 end)
 
 -- MINIMIZE
@@ -787,16 +692,11 @@ local fullSize = mainFrame.Size
 minBtn.MouseButton1Click:Connect(function()
     isMinimized = not isMinimized
     if isMinimized then
-        TweenService:Create(mainFrame, TweenInfo.new(0.25, Enum.EasingStyle.Quint), {
-            Size = UDim2.fromOffset(460, 36)
-        }):Play()
-        contentFrame.Visible = false
-        minBtn.Text = "+"
+        TweenService:Create(mainFrame, TweenInfo.new(0.25, Enum.EasingStyle.Quint), { Size = UDim2.fromOffset(460, 36) }):Play()
+        contentFrame.Visible = false; minBtn.Text = "+"
     else
         contentFrame.Visible = true
-        TweenService:Create(mainFrame, TweenInfo.new(0.25, Enum.EasingStyle.Quint), {
-            Size = fullSize
-        }):Play()
+        TweenService:Create(mainFrame, TweenInfo.new(0.25, Enum.EasingStyle.Quint), { Size = fullSize }):Play()
         minBtn.Text = "–"
     end
 end)
@@ -807,314 +707,235 @@ task.spawn(function()
         local elapsed = tick() - huntStartTime
         timerVal.Text = formatTime(elapsed)
         local minutes = elapsed / 60
-        if minutes > 0 then
-            epmVal.Text = string.format("%.1f", encounterCount / minutes)
-        end
+        if minutes > 0 then epmVal.Text = string.format("%.1f", encounterCount / minutes) end
         if battleState == "active" and (tick() - lastBattleTick) > 30 then
-            battleState = "idle"
-            stateVal.Text = "Idle"
-            stateVal.TextColor3 = C.TextDim
+            battleState = "idle"; stateVal.Text = "Idle"; stateVal.TextColor3 = C.TextDim
         end
         task.wait(1)
     end
 end)
-
--- Session webhook every 50 encounters
 task.spawn(function()
-    local lastMilestone = 0
+    local lastMs = 0
     while gui.Parent do
-        if encounterCount > 0 and encounterCount % 50 == 0 and encounterCount ~= lastMilestone then
-            lastMilestone = encounterCount
-            local elapsed = tick() - huntStartTime
-            sendSessionWebhook(encounterCount, formatTime(elapsed), raresFoundCount)
+        if encounterCount > 0 and encounterCount % 50 == 0 and encounterCount ~= lastMs then
+            lastMs = encounterCount
+            sendSessionWebhook(encounterCount, formatTime(tick() - huntStartTime), raresFoundCount)
         end
         task.wait(5)
     end
 end)
 
 --------------------------------------------------
--- BATTLE DATA PROCESSING
--- 
--- ACTUAL DATA FORMAT (from discovery logs):
---   EVT fires with:
---     arg1 = "BattleEvent" (string, the event category)
---     arg2 = session ID (string like "cF1/ILhDThSQ8FD7Ki0XEA")
---     arg3 = sub-command (string: "update", "request", "inactiveside", "winupdate")
---     arg4 = battle data table OR string "p1"/number
---     arg5 = table with side info (sometimes)
+-- BATTLE PROCESSING (THE CORE FIX)
 --
--- When arg3 = first update of battle (or any update), arg4 is a TABLE like:
---   {
---     [1] = {"player", "p2", "#Wild", 0},
---     [2] = {"player", "p1", "glo", 0},
---     [3] = {"owm", "p1", "1p1: Dripple", "Dripple, L13, M;41/44;0.008547;117/117", {model}, 0},
---     [4] = {"start"},
---   }
+-- From discovery logs, the actual data is:
+--   arg4 = { {cmd, ...}, {cmd, ...}, ... }
+-- Where commands are:
+--   {"player", "p2", "#Wild", 0}
+--   {"player", "p1", "glo", 0}
+--   {"owm", "p1", "1p1: Dripple", "Dripple, L13, M;41/44;...", {disc=..., name=..., scale=...}, 0}
+--   {"start"}
+--   {"switch", "1p2a: Grubby", "Grubby, L5, M;18/18;...", {disc=..., name=...}, {icon=...}}
 --
--- Commands found in the array:
---   "player" — side info, [3] = tag like "#Wild" or player name
---   "owm"    — (own monster) Loomian switch-in data, same format as old "switch"
---   "switch" — also possible for switch-ins
---   "start"  — battle start marker
---   "move"   — move used, contains attacker & defender names
---   "damage" — damage dealt, contains target name & HP
---   "-damage" — healing or negative damage
---   "end"    — battle end
+-- KEY DIFFERENCE: "owm" has side as entry[2], identifier as entry[3]
+--                 "switch" has identifier as entry[2] (contains side like "p2a")
 --------------------------------------------------
 
-local function processCommandArray(cmdArray)
-    -- cmdArray is like {"owm", "p1", "1p1: Dripple", "Dripple, L13, ...", {model}, 0}
-    local cmd = cmdArray[1]
-    if type(cmd) ~= "string" then return end
-    local cmdLower = string.lower(cmd)
+local function extractNameAndSide(cmdEntry)
+    -- Returns: rawName, side ("p1"/"p2"), infoStr, displayName
+    local cmd = cmdEntry[1]
+    if type(cmd) ~= "string" then return nil end
+    local cmdL = string.lower(cmd)
 
-    -- PLAYER command: identifies sides
-    if cmdLower == "player" then
-        local side = cmdArray[2]  -- "p1" or "p2"
-        local tag = cmdArray[3]   -- "#Wild" or player name like "glo"
-        log("BATTLE", "  player:", tostring(side), "tag:", tostring(tag))
+    if cmdL ~= "owm" and cmdL ~= "switch" then return nil end
 
-        if type(tag) == "string" then
-            if string.find(tag, "#Wild") then
-                currentBattle.battleType = "Wild"
-            elseif side == "p2" then
-                -- p2 with a non-Wild tag = trainer battle
-                currentBattle.battleType = "Trainer"
-            end
-        end
-        return
-    end
+    local rawName = nil
+    local side = nil
+    local infoStr = nil
 
-    -- OWM / SWITCH command: Loomian enters battle
-    if cmdLower == "owm" or cmdLower == "switch" then
-        local side = cmdArray[2]       -- "p1" or "p2"
-        local identifier = cmdArray[3] -- "1p1: Dripple" or "1p2a: Grubby"
-        local infoStr = cmdArray[4]    -- "Dripple, L13, M;41/44;0.008547;117/117"
-        local extra = cmdArray[5]      -- table with model/disc info
-
-        -- Extract name from identifier
-        local rawName = nil
-        if type(identifier) == "string" then
-            rawName = identifier:match(":%s*(.+)$")
-        end
-
-        -- Fallback: model name from extra
-        if not rawName and type(extra) == "table" then
-            if type(extra.name) == "string" then
-                rawName = extra.name
-            elseif type(extra.model) == "table" and type(extra.model.name) == "string" then
-                rawName = extra.model.name
-            end
-        end
-
-        -- Fallback: extract from infoStr
-        if not rawName and type(infoStr) == "string" then
-            rawName = infoStr:match("^([^,]+)")
-        end
-
-        if not rawName then
-            log("BATTLE", "  " .. cmd .. ": couldn't extract name from", tostring(identifier))
-            return
-        end
-
-        local displayName = extractLoomianName(rawName)
-        local stats = parseLoomianStats(type(infoStr) == "string" and infoStr or nil)
-
-        -- Determine side: use explicit side arg, or fall back to identifier
-        local isPlayer = false
-        local isEnemy = false
-
-        if type(side) == "string" then
-            if side == "p1" or string.find(side, "p1") then
-                isPlayer = true
-            elseif side == "p2" or string.find(side, "p2") then
-                isEnemy = true
-            end
-        end
-
-        -- Additional check from identifier
-        if not isPlayer and not isEnemy and type(identifier) == "string" then
-            if string.find(identifier, "p1") then isPlayer = true
-            elseif string.find(identifier, "p2") then isEnemy = true
-            end
-        end
-
-        -- Fallback: positional
-        if not isPlayer and not isEnemy then
-            if not currentBattle.enemy then isEnemy = true
-            else isPlayer = true end
-        end
-
-        if isEnemy then
-            currentBattle.enemy = displayName
-            currentBattle.enemyStats = stats
-            log("BATTLE", "  ENEMY:", displayName, stats and ("Lv." .. tostring(stats.level)) or "")
-        elseif isPlayer then
-            currentBattle.player = displayName
-            currentBattle.playerStats = stats
-            log("BATTLE", "  PLAYER:", displayName, stats and ("Lv." .. tostring(stats.level)) or "")
-        end
-        return
-    end
-
-    -- MOVE command: can give us enemy name if we don't have it
-    -- Format: {"move", "1p1a: Dripple", {moveInfo}, "95/115", "1p2a: Grubby", {typeInfo}}
-    if cmdLower == "move" then
-        -- Try to extract target (enemy) from the move
-        for i = 2, #cmdArray do
-            local val = cmdArray[i]
-            if type(val) == "string" then
-                local pNum, name = val:match("p(%d+)%a*:%s*(.+)$")
-                if pNum and name and not currentBattle.enemy and pNum == "2" then
-                    currentBattle.enemy = extractLoomianName(name)
-                    log("BATTLE", "  Enemy from move:", currentBattle.enemy)
+    -- Scan ALL string args to find: side, identifier (has ":"), and info string (has ", L")
+    for i = 2, math.min(#cmdEntry, 8) do
+        local v = cmdEntry[i]
+        if type(v) == "string" then
+            -- Pure side: "p1" or "p2"
+            if (v == "p1" or v == "p2") and not side then
+                side = v
+            -- Identifier with colon: "1p1a: Dripple" or "1p2a: Grubby"
+            elseif string.find(v, ":%s*.+") then
+                local n = v:match(":%s*(.+)$")
+                if n then rawName = n end
+                -- Extract side from identifier too
+                if string.find(v, "p1") then side = side or "p1"
+                elseif string.find(v, "p2") then side = side or "p2" end
+            -- Info string: "Dripple, L13, M;41/44;..."
+            elseif string.find(v, ", L%d+") then
+                infoStr = v
+                -- Can also get name from info string
+                if not rawName then
+                    rawName = v:match("^([^,]+)")
                 end
             end
-        end
-        return
-    end
-
-    -- DAMAGE command: can also give us names
-    -- Format: {"-damage" or "damage", "1p2a: Grubby", "0/17;0;77/77", 0}
-    if cmdLower == "damage" or cmdLower == "-damage" then
-        local target = cmdArray[2]
-        if type(target) == "string" then
-            local pNum, name = target:match("p(%d+)%a*:%s*(.+)$")
-            if pNum and name then
-                if pNum == "2" and not currentBattle.enemy then
-                    currentBattle.enemy = extractLoomianName(name)
-                    log("BATTLE", "  Enemy from damage:", currentBattle.enemy)
-                end
+        elseif type(v) == "table" and not rawName then
+            -- Model table: might have .name
+            if type(v.name) == "string" then
+                rawName = v.name
             end
         end
-        return
     end
 
-    -- START command
-    if cmdLower == "start" then
-        log("BATTLE", "  >>> BATTLE START <<<")
-        return
+    if rawName then
+        return rawName, side, infoStr, extractLoomianName(rawName)
     end
+    return nil
 end
 
-local function processBattleEventData(dataTable)
-    if type(dataTable) ~= "table" then return end
+local function processBattleCommands(commandTable)
+    log("BATTLE", "========== PROCESSING " .. tostring(#commandTable) .. " COMMANDS ==========")
+    addBattleLog(">>> " .. tostring(#commandTable) .. " battle cmds <<<", C.Green)
 
-    log("BATTLE", "=== Processing battle data (" .. tostring(#dataTable) .. " commands) ===")
-    addBattleLog(">>> Battle data: " .. tostring(#dataTable) .. " cmds <<<", C.Green)
-
-    -- Check if this looks like a new battle (has "start" command)
-    local hasStart = false
-    for _, entry in pairs(dataTable) do
+    -- Check for "start" -> new battle
+    for _, entry in pairs(commandTable) do
         if type(entry) == "table" and type(entry[1]) == "string" and string.lower(entry[1]) == "start" then
-            hasStart = true
+            log("BATTLE", "  NEW BATTLE (start found)")
+            resetBattle()
+            currentBattle.active = true
             break
         end
     end
 
-    if hasStart then
-        resetBattle()
-        currentBattle.active = true
-        battleState = "active"
-        lastBattleTick = tick()
-        stateVal.Text = "In Battle"
-        stateVal.TextColor3 = C.Green
-    end
-
-    -- Process all commands in order
-    for i = 1, #dataTable do
-        local entry = dataTable[i]
-        if type(entry) == "table" and type(entry[1]) == "string" then
-            processCommandArray(entry)
-        end
-    end
-
-    -- Also process with pairs() in case indices are non-sequential
-    for k, entry in pairs(dataTable) do
-        if type(k) ~= "number" or k < 1 or k > #dataTable then
-            if type(entry) == "table" and type(entry[1]) == "string" then
-                processCommandArray(entry)
+    -- Process "player" commands first (to establish battle type)
+    for _, entry in pairs(commandTable) do
+        if type(entry) == "table" and type(entry[1]) == "string" and string.lower(entry[1]) == "player" then
+            local side = entry[2]
+            local tag = entry[3]
+            log("BATTLE", "  player cmd: side=" .. tostring(side) .. " tag=" .. tostring(tag))
+            if type(tag) == "string" then
+                if string.find(tag, "#Wild") then
+                    currentBattle.battleType = "Wild"
+                elseif side == "p2" then
+                    currentBattle.battleType = "Trainer"
+                end
             end
         end
     end
 
-    lastBattleTick = tick()
+    -- Process "owm" and "switch" commands (Loomian data)
+    for _, entry in pairs(commandTable) do
+        if type(entry) == "table" and type(entry[1]) == "string" then
+            local cmdL = string.lower(entry[1])
+            if cmdL == "owm" or cmdL == "switch" then
+                local rawName, side, infoStr, displayName = extractNameAndSide(entry)
+                if rawName then
+                    local stats = parseLoomianStats(infoStr)
+                    log("BATTLE", "  " .. entry[1] .. ": name=" .. displayName .. " side=" .. tostring(side))
 
-    -- Update battle state
-    if not currentBattle.active then
-        currentBattle.active = true
-        battleState = "active"
-        stateVal.Text = "In Battle"
-        stateVal.TextColor3 = C.Green
+                    if side == "p2" then
+                        currentBattle.enemy = displayName
+                        currentBattle.enemyStats = stats
+                        log("BATTLE", "    -> ENEMY: " .. displayName)
+                    elseif side == "p1" then
+                        currentBattle.player = displayName
+                        currentBattle.playerStats = stats
+                        log("BATTLE", "    -> PLAYER: " .. displayName)
+                    else
+                        -- No side detected, use position
+                        if not currentBattle.enemy then
+                            currentBattle.enemy = displayName
+                            currentBattle.enemyStats = stats
+                        elseif not currentBattle.player then
+                            currentBattle.player = displayName
+                            currentBattle.playerStats = stats
+                        end
+                    end
+                else
+                    log("BATTLE", "  " .. entry[1] .. ": FAILED to extract name")
+                    -- Emergency dump of this entry
+                    for idx = 1, math.min(#entry, 6) do
+                        log("BATTLE", "    [" .. idx .. "] type=" .. type(entry[idx]) .. " val=" .. tostring(entry[idx]))
+                    end
+                end
+            end
+        end
     end
+
+    -- Also try to get enemy name from "move" / "damage" commands if still unknown
+    if not currentBattle.enemy then
+        for _, entry in pairs(commandTable) do
+            if type(entry) == "table" and type(entry[1]) == "string" then
+                local cmdL = string.lower(entry[1])
+                if cmdL == "move" or cmdL == "damage" or cmdL == "-damage" then
+                    for i = 2, #entry do
+                        if type(entry[i]) == "string" then
+                            local pNum, name = entry[i]:match("p(%d+)%a*:%s*(.+)$")
+                            if pNum == "2" and name then
+                                currentBattle.enemy = extractLoomianName(name)
+                                log("BATTLE", "  enemy from " .. cmdL .. ": " .. currentBattle.enemy)
+                                break
+                            end
+                        end
+                    end
+                    if currentBattle.enemy then break end
+                end
+            end
+        end
+    end
+
+    -- Mark active
+    battleState = "active"
+    lastBattleTick = tick()
+    currentBattle.active = true
+    stateVal.Text = "In Battle"
+    stateVal.TextColor3 = C.Green
 
     local enemyName = currentBattle.enemy or "Unknown"
     local playerName = currentBattle.player or "Unknown"
 
-    log("BATTLE", "Result: Enemy=" .. enemyName .. " Player=" .. playerName .. " Type=" .. currentBattle.battleType)
+    log("BATTLE", "RESULT: Enemy=" .. enemyName .. " Player=" .. playerName .. " Type=" .. currentBattle.battleType)
 
-    -- Update battle type display
+    -- Update display
     if currentBattle.battleType == "Wild" then
-        typeVal.Text = "Wild"
-        typeVal.TextColor3 = C.Wild
+        typeVal.Text = "Wild"; typeVal.TextColor3 = C.Wild
     elseif currentBattle.battleType == "Trainer" then
-        typeVal.Text = "Trainer"
-        typeVal.TextColor3 = C.Trainer
+        typeVal.Text = "Trainer"; typeVal.TextColor3 = C.Trainer
     end
 
-    -- Count encounter on new enemy detection (wild only)
     if enemyName ~= "Unknown" and not currentBattle.enemyProcessed then
         currentBattle.enemyProcessed = true
 
         if currentBattle.battleType == "Wild" then
             encounterCount = encounterCount + 1
             encounterVal.Text = tostring(encounterCount)
-            table.insert(encounterHistory, 1, { name = enemyName, time = os.date("%X"), count = encounterCount })
+            table.insert(encounterHistory, 1, { name = enemyName, time = os.date("%X") })
             if #encounterHistory > 10 then table.remove(encounterHistory, 11) end
         end
 
-        -- Rare check
         local rareFound = isRareLoomian(enemyName) or isRareModifier(enemyName)
-
         if rareFound then
             enemyLbl.Text = 'Enemy: <font color="#FFD700">⭐ ' .. enemyName .. ' (RARE!)</font>'
             addBattleLog("⭐ RARE: " .. enemyName, C.Gold)
-
             if currentEnemy ~= enemyName then
                 currentEnemy = enemyName
                 raresFoundCount = raresFoundCount + 1
-                log("RARE", "🌟 RARE FOUND:", enemyName)
                 playRareSound()
-                sendNotification("⭐ LumiWare Rare Finder", "RARE SPOTTED: " .. enemyName .. "!", 10)
-                local extra = currentBattle.enemyStats and ("Lv." .. tostring(currentBattle.enemyStats.level)) or nil
-                addRareLog(enemyName, extra)
-                local elapsed = tick() - huntStartTime
-                local gender = currentBattle.enemyStats and currentBattle.enemyStats.gender or "?"
-                sendRareWebhook(enemyName, currentBattle.enemyStats and currentBattle.enemyStats.level, gender, encounterCount, formatTime(elapsed))
+                sendNotification("⭐ LumiWare", "RARE: " .. enemyName .. "!", 10)
+                addRareLog(enemyName, currentBattle.enemyStats and ("Lv." .. tostring(currentBattle.enemyStats.level)) or nil)
+                sendRareWebhook(enemyName, currentBattle.enemyStats and currentBattle.enemyStats.level,
+                    currentBattle.enemyStats and currentBattle.enemyStats.gender or "?",
+                    encounterCount, formatTime(tick() - huntStartTime))
             end
         else
             enemyLbl.Text = "Enemy: " .. enemyName
             addBattleLog(currentBattle.battleType .. ": " .. enemyName, C.TextDim)
             currentEnemy = nil
         end
-    elseif enemyName ~= "Unknown" then
-        -- Update display even if already processed (e.g. HP changes)
-        local rareFound = isRareLoomian(enemyName) or isRareModifier(enemyName)
-        if rareFound then
-            enemyLbl.Text = 'Enemy: <font color="#FFD700">⭐ ' .. enemyName .. ' (RARE!)</font>'
-        else
-            enemyLbl.Text = "Enemy: " .. enemyName
-        end
     end
 
-    -- Enemy stats
     if currentBattle.enemyStats then
         local s = currentBattle.enemyStats
         local g = s.gender == "M" and "♂" or (s.gender == "F" and "♀" or "?")
         enemyStatsLbl.Text = string.format("Lv.%d  %s  HP %d/%d", s.level or 0, g, s.hp or 0, s.maxHP or 0)
     end
 
-    -- Player display
     if playerName ~= "Unknown" then
         playerLbl.Text = "Your Loomian: " .. playerName
         if currentBattle.playerStats then
@@ -1124,11 +945,43 @@ local function processBattleEventData(dataTable)
         end
     end
 
-    log("BATTLE", "=== END ===")
+    log("BATTLE", "========== DONE ==========")
 end
 
 --------------------------------------------------
--- REMOTE HOOKING
+-- FIND COMMAND TABLE IN ANY ARG
+-- This is the critical function. It searches ALL
+-- args (using select() to avoid #args issues)
+-- for a table that contains battle command arrays.
+--------------------------------------------------
+local KNOWN_COMMANDS = {
+    player = true, owm = true, switch = true, start = true,
+    move = true, damage = true, ["-damage"] = true,
+    turn = true, faint = true, ["end"] = true,
+}
+
+local function findCommandTable(...)
+    local n = select("#", ...)
+    for i = 1, n do
+        local arg = select(i, ...)
+        if type(arg) == "table" then
+            -- Check if this table contains subtables with known command strings
+            for k, v in pairs(arg) do
+                if type(v) == "table" and type(v[1]) == "string" then
+                    local cmd = string.lower(v[1])
+                    if KNOWN_COMMANDS[cmd] then
+                        log("BATTLE", "Found command table in arg" .. i .. " (first cmd: " .. v[1] .. ")")
+                        return arg, i
+                    end
+                end
+            end
+        end
+    end
+    return nil
+end
+
+--------------------------------------------------
+-- HOOK REMOTES
 --------------------------------------------------
 local hooked = {}
 local hookedCount = 0
@@ -1138,162 +991,91 @@ local function hookEvent(remote)
     hooked[remote] = true
     hookedCount = hookedCount + 1
 
-    local remoteName = remote.Name
-
     remote.OnClientEvent:Connect(function(...)
-        local args = {...}
-
-        -- Discovery mode: log everything from EVT
+        -- Discovery logging
         if discoveryMode then
-            local argInfo = {}
-            for i, arg in ipairs(args) do
-                local info = "arg" .. i .. "=" .. type(arg)
-                if type(arg) == "string" then
-                    info = info .. '("' .. string.sub(arg, 1, 25) .. '")'
-                elseif type(arg) == "table" then
-                    info = info .. "(#" .. tostring(#arg) .. ")"
+            local n = select("#", ...)
+            local parts = {}
+            for i = 1, n do
+                local a = select(i, ...)
+                local info = "arg" .. i .. "=" .. type(a)
+                if type(a) == "string" then info = info .. '("' .. string.sub(a, 1, 20) .. '")'
+                elseif type(a) == "table" then
+                    -- Use pairs to count since # can be unreliable
+                    local c = 0
+                    for _ in pairs(a) do c = c + 1 end
+                    info = info .. "(n=" .. c .. ")"
                 end
-                table.insert(argInfo, info)
+                table.insert(parts, info)
             end
-            addBattleLog("📡 " .. remoteName .. " | " .. table.concat(argInfo, ", "), Color3.fromRGB(180, 180, 180))
+            addBattleLog("📡 " .. remote.Name .. " | " .. table.concat(parts, ", "), Color3.fromRGB(180, 180, 180))
 
-            -- Verbose: dump table args
             if VERBOSE_MODE then
-                for i, arg in ipairs(args) do
-                    if type(arg) == "table" then
-                        log("EVT", remoteName, "arg" .. i .. ":", tablePreview(arg))
+                local n2 = select("#", ...)
+                for i = 1, n2 do
+                    local a = select(i, ...)
+                    if type(a) == "table" then
+                        log("EVT", remote.Name, "arg" .. i .. ":", tablePreview(a))
                     end
                 end
             end
         end
 
-        -- ========================================
-        -- MAIN BATTLE DETECTION
-        -- Look for "BattleEvent" in arg1 (or any arg that = "BattleEvent")
-        -- Then find the command table in subsequent args
-        -- ========================================
+        -- ===== BATTLE DETECTION =====
+        -- Step 1: Is this a battle-related event?
+        local arg1 = select(1, ...)
+        local isBattle = false
 
-        local isBattleEvent = false
-        local battleDataTable = nil
-
-        -- Check arg1 for "BattleEvent" or similar
-        if type(args[1]) == "string" then
-            local a1 = string.lower(args[1])
-            if string.find(a1, "battle") then
-                isBattleEvent = true
+        if type(arg1) == "string" then
+            local a1l = string.lower(arg1)
+            if string.find(a1l, "battle") then
+                isBattle = true
             end
         end
 
-        if isBattleEvent then
-            -- Find the battle data table in remaining args
-            -- It's typically in arg4 or arg5, and it's a table containing subtables
-            for i = 2, #args do
-                local arg = args[i]
-                if type(arg) == "table" then
-                    -- Check if this table contains command arrays
-                    local hasCommandArrays = false
-                    for _, entry in pairs(arg) do
-                        if type(entry) == "table" and type(entry[1]) == "string" then
-                            local cmd = string.lower(entry[1])
-                            if cmd == "player" or cmd == "owm" or cmd == "switch" or cmd == "start"
-                               or cmd == "move" or cmd == "damage" or cmd == "-damage"
-                               or cmd == "end" or cmd == "faint" or cmd == "turn" then
-                                hasCommandArrays = true
-                                break
-                            end
-                        end
-                    end
-
-                    if hasCommandArrays then
-                        battleDataTable = arg
-                        log("BATTLE", "Found battle data in", remoteName, "arg" .. i, "(BattleEvent)")
-                        break
-                    end
-                end
-            end
-
-            if battleDataTable then
-                processBattleEventData(battleDataTable)
+        if isBattle then
+            -- Step 2: Find the command table using select() — avoids #args issues
+            local cmdTable, argIdx = findCommandTable(...)
+            if cmdTable then
+                processBattleCommands(cmdTable)
             else
-                -- BattleEvent but no command table found — might be a status update
-                -- Check arg5 for side info
-                if type(args[5]) == "table" then
-                    local arg5 = args[5]
-                    if arg5.side or arg5.hasRoom or arg5.requestType then
-                        logDebug("BattleEvent status:", tostring(args[3]), "side info present")
-                    end
-                end
-                logDebug("BattleEvent without command table, arg3:", tostring(args[3]))
+                logDebug("BattleEvent no cmd table, arg3=" .. tostring(select(3, ...)))
             end
             return
         end
 
-        -- ========================================
-        -- FALLBACK: Check ALL table args for command arrays
-        -- (in case the remote doesn't use "BattleEvent" as arg1)
-        -- ========================================
-        for i, arg in ipairs(args) do
-            if type(arg) == "table" then
-                local commandCount = 0
-                for _, entry in pairs(arg) do
-                    if type(entry) == "table" and type(entry[1]) == "string" then
-                        local cmd = string.lower(entry[1])
-                        if cmd == "player" or cmd == "owm" or cmd == "switch" or cmd == "start" then
-                            commandCount = commandCount + 1
-                        end
-                    end
-                end
-
-                -- Need at least 2 known commands to avoid false positives
-                if commandCount >= 2 then
-                    log("BATTLE", "Found battle data (fallback) in", remoteName, "arg" .. i, "(" .. commandCount .. " cmds)")
-                    processBattleEventData(arg)
-                    return
-                end
-            end
+        -- Fallback: check any table arg for commands (non-BattleEvent remotes)
+        local cmdTable = findCommandTable(...)
+        if cmdTable then
+            log("BATTLE", "Fallback detection in " .. remote.Name)
+            processBattleCommands(cmdTable)
         end
     end)
 end
 
--- Hook everything
-log("HOOK", "Scanning ReplicatedStorage...")
-local rsCount = 0
+-- Hook all
+log("HOOK", "Scanning...")
+local c = 0
 for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do
-    if obj:IsA("RemoteEvent") then hookEvent(obj) rsCount = rsCount + 1 end
+    if obj:IsA("RemoteEvent") then hookEvent(obj) c = c + 1 end
 end
-log("HOOK", "Hooked", rsCount, "from ReplicatedStorage")
+log("HOOK", "Hooked", c, "from ReplicatedStorage")
 
 ReplicatedStorage.DescendantAdded:Connect(function(obj)
-    if obj:IsA("RemoteEvent") then
-        hookEvent(obj)
-        log("HOOK", "New remote hooked:", obj:GetFullName())
-    end
+    if obj:IsA("RemoteEvent") then hookEvent(obj) end
 end)
 
 pcall(function()
-    local c = 0
     for _, obj in ipairs(game:GetService("Workspace"):GetDescendants()) do
-        if obj:IsA("RemoteEvent") then hookEvent(obj) c = c + 1 end
+        if obj:IsA("RemoteEvent") then hookEvent(obj) end
     end
-    if c > 0 then log("HOOK", "Hooked", c, "from Workspace") end
 end)
-
 pcall(function()
-    local c = 0
     for _, obj in ipairs(player:WaitForChild("PlayerGui"):GetDescendants()) do
-        if obj:IsA("RemoteEvent") then hookEvent(obj) c = c + 1 end
+        if obj:IsA("RemoteEvent") then hookEvent(obj) end
     end
-    if c > 0 then log("HOOK", "Hooked", c, "from PlayerGui") end
 end)
 
-addBattleLog("Hooked " .. hookedCount .. " remotes — ready", C.Green)
-
---------------------------------------------------
--- STARTUP
---------------------------------------------------
-log("INFO", "========================================")
-log("INFO", "LumiWare v3 READY — Player:", PLAYER_NAME)
-log("INFO", "Hooked:", hookedCount, "remotes")
-log("INFO", "Format: BattleEvent -> arg4 commands (owm/switch/player/start)")
-log("INFO", "========================================")
-sendNotification("⚡ LumiWare v3", "Hooked " .. hookedCount .. " remotes.\nTracking rares. Battle detection active.", 6)
+addBattleLog("Hooked " .. hookedCount .. " remotes — READY", C.Green)
+log("INFO", "LumiWare v3.1 READY | Hooked " .. hookedCount .. " | Player: " .. PLAYER_NAME)
+sendNotification("⚡ LumiWare v3.1", "Hooked " .. hookedCount .. " remotes. Battle detection active.", 6)
