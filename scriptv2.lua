@@ -1694,47 +1694,49 @@ end
 local function clickButton(button)
     if not button then return false end
     
-    -- METHOD 1 (PRIMARY for Xeno): firesignal with signal object
-    pcall(function()
-        if firesignal then firesignal(button.MouseButton1Click) end
-    end)
-    
-    -- METHOD 2: firesignal with instance + signal name (alternative signature)
-    pcall(function()
-        if firesignal then firesignal(button, "MouseButton1Click") end
-    end)
-    
-    -- METHOD 3: fireclick
-    pcall(function()
-        if fireclick then fireclick(button) end
-    end)
-    
-    -- METHOD 4: getconnections
-    pcall(function()
-        if getconnections then
-            for _, conn in ipairs(getconnections(button.MouseButton1Click)) do
-                pcall(function() conn:Fire() end)
+    -- FAST PATH: firesignal (instant, no delays) - try all signal variants
+    local signalFired = false
+    if firesignal then
+        -- Try every possible signal on button and its parent
+        pcall(function() firesignal(button.MouseButton1Click) end)
+        pcall(function() firesignal(button, "MouseButton1Click") end)
+        pcall(function() firesignal(button.Activated) end)
+        pcall(function() firesignal(button, "Activated") end)
+        pcall(function()
+            if button.Parent then
+                firesignal(button.Parent.MouseButton1Click)
+                firesignal(button.Parent, "MouseButton1Click")
             end
-        end
+        end)
+        signalFired = true
+    end
+    
+    -- fireclick (also instant)
+    pcall(function()
+        if fireclick then fireclick(button); signalFired = true end
     end)
     
-    -- METHOD 5: VirtualInputManager without inset
-    pcall(function()
-        local p, s = button.AbsolutePosition, button.AbsoluteSize
-        local cx, cy = p.X + s.X/2, p.Y + s.Y/2
-        VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, true, game, 1)
-        task.wait(0.03)
-        VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, false, game, 1)
-    end)
+    -- If signal methods worked, return IMMEDIATELY (no VIM delay!)
+    if signalFired then return true end
     
-    -- METHOD 6: VirtualInputManager with inset
-    pcall(function()
-        local inset = game:GetService("GuiService"):GetGuiInset()
-        local p, s = button.AbsolutePosition, button.AbsoluteSize
-        local cx, cy = p.X + s.X/2, p.Y + s.Y/2 + inset.Y
-        VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, true, game, 1)
-        task.wait(0.03)
-        VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, false, game, 1)
+    -- SLOW PATH: VirtualInputManager (only if no signal methods exist)
+    -- Run async so it doesn't block
+    task.spawn(function()
+        pcall(function()
+            local p, s = button.AbsolutePosition, button.AbsoluteSize
+            local cx, cy = p.X + s.X/2, p.Y + s.Y/2
+            VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, true, game, 1)
+            task.wait(0.03)
+            VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, false, game, 1)
+        end)
+        pcall(function()
+            local inset = game:GetService("GuiService"):GetGuiInset()
+            local p, s = button.AbsolutePosition, button.AbsoluteSize
+            local cx, cy = p.X + s.X/2, p.Y + s.Y/2 + inset.Y
+            VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, true, game, 1)
+            task.wait(0.03)
+            VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, false, game, 1)
+        end)
     end)
     
     return true
@@ -1782,9 +1784,20 @@ local function performAutoAction()
 
         if autoMode == "run" then
             if ui.runButton then
-                log("AUTO", "Auto-RUN: clicking Run")
+                log("AUTO", "Auto-RUN: clicking Run (with retries)")
                 addBattleLog("🤖 Auto-RUN ▸ fleeing", C.Cyan)
-                clickButton(ui.runButton)
+                -- RETRY LOOP: click Run up to 10 times until the battle actually ends
+                for attempt = 1, 10 do
+                    local freshUI = findBattleUI()
+                    if not freshUI or not freshUI.runButton then
+                        -- Run button gone = battle ending or UI changed, stop clicking
+                        log("AUTO", "Run button disappeared after " .. attempt .. " attempts")
+                        break
+                    end
+                    clickButton(freshUI.runButton)
+                    -- Wait 200ms between retries and check if battle ended
+                    task.wait(0.2)
+                end
             else
                 addBattleLog("⚠ Auto: Run button not found", C.Orange)
             end
