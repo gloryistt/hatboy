@@ -1733,12 +1733,42 @@ local function performAutoAction()
                 end
 
                 if not turnUI or (not turnUI.fightButton and #turnUI.moveButtons == 0) then
-                    log("AUTO", "Auto-MOVE: BattleGui gone, battle over after " .. turnCount - 1 .. " turns")
-                    break
+                    log("AUTO", "Auto-MOVE: No UI found, assuming cutscene/animation. Waiting...")
+                    -- Don't break here, let the bottom wait loop handle the patience
+                    turnUI = { fightButton = nil, moveButtons = {}, moveNames = {} }
                 end
 
-                -- STEP 1: Click Fight if present
-                if turnUI.fightButton then
+                -- STEP 1: If we have moves already, skip Fight entirely.
+                -- Otherwise, click Fight if present and wait for moves.
+                if #turnUI.moveButtons > 0 then
+                    local targetSlot = autoMoveSlot
+                    if type(autoMoveSlot) == "string" and not tonumber(autoMoveSlot) then
+                        local searchName = string.lower(autoMoveSlot)
+                        for s = 1, 4 do
+                            if turnUI.moveNames[s] and string.find(turnUI.moveNames[s], searchName) then
+                                targetSlot = s
+                                break
+                            end
+                        end
+                        if type(targetSlot) == "string" then targetSlot = 1 end
+                    else
+                        targetSlot = tonumber(autoMoveSlot) or 1
+                    end
+                    targetSlot = math.clamp(targetSlot, 1, 4)
+
+                    if turnUI.moveButtons[targetSlot] then
+                        clickButton(turnUI.moveButtons[targetSlot])
+                        addBattleLog("🤖 Turn " .. turnCount .. " ▸ Move " .. targetSlot, C.Green)
+                    else
+                        for s = 1, 4 do
+                            if turnUI.moveButtons[s] then
+                                clickButton(turnUI.moveButtons[s])
+                                addBattleLog("🤖 Turn " .. turnCount .. " ▸ Move " .. s .. " (fb)", C.Green)
+                                break
+                            end
+                        end
+                    end
+                elseif turnUI.fightButton then
                     log("AUTO", "Auto-MOVE turn " .. turnCount .. ": clicking Fight")
                     if turnCount == 1 then
                         addBattleLog("🤖 Auto-MOVE ▸ fighting...", C.Green)
@@ -1795,49 +1825,23 @@ local function performAutoAction()
                         end
                     else
                         addBattleLog("⚠ No move buttons turn " .. turnCount, C.Orange)
-                        break
+                        -- Don't break, just let the wait loop run
                     end
-                elseif #turnUI.moveButtons > 0 then
-                    -- Already on move screen
-                    local targetSlot = autoMoveSlot
-                    if type(autoMoveSlot) == "string" and not tonumber(autoMoveSlot) then
-                        local searchName = string.lower(autoMoveSlot)
-                        for s = 1, 4 do
-                            if turnUI.moveNames[s] and string.find(turnUI.moveNames[s], searchName) then
-                                targetSlot = s
-                                break
-                            end
-                        end
-                        if type(targetSlot) == "string" then targetSlot = 1 end
-                    else
-                        targetSlot = tonumber(autoMoveSlot) or 1
-                    end
-                    targetSlot = math.clamp(targetSlot, 1, 4)
-
-                    if turnUI.moveButtons[targetSlot] then
-                        clickButton(turnUI.moveButtons[targetSlot])
-                        addBattleLog("🤖 Turn " .. turnCount .. " ▸ Move " .. targetSlot, C.Green)
-                    else
-                        for s = 1, 4 do
-                            if turnUI.moveButtons[s] then
-                                clickButton(turnUI.moveButtons[s])
-                                addBattleLog("🤖 Turn " .. turnCount .. " ▸ Move " .. s .. " (fb)", C.Green)
-                                break
-                            end
-                        end
-                    end
-                else
-                    break
                 end
 
-                -- Wait for the turn to resolve (enemy attacks, animations, etc.)
-                -- Then wait for either battle to end or next turn to start
-                task.wait(3)
+                -- Wait for the UI to disappear (meaning the move was selected and animations are starting)
+                local vanishStart = tick()
+                while (tick() - vanishStart) < 5 do
+                    local vUI = findBattleUI()
+                    if not vUI or (#vUI.moveButtons == 0 and not vUI.fightButton) then
+                        break
+                    end
+                    task.wait(0.2)
+                end
 
-                -- Poll for next turn — wait until Fight/Run reappears
-                -- REMOVED "break if not checkUI", because it legally vanishes during attacks
+                -- Now wait for the animations to finish and the next turn to start
                 local waitStart = tick()
-                while (tick() - waitStart) < 15 do
+                while (tick() - waitStart) < 30 do -- Increased timeout for long attack animations
                     if rareFoundPause or autoMode ~= "move" then break end
                     local checkUI = findBattleUI()
                     if checkUI and (checkUI.fightButton or checkUI.runButton) then
