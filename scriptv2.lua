@@ -1665,10 +1665,16 @@ local function clickButton(button)
             return
         end
         -- Method 3: VirtualInputManager
+        local guiService = game:GetService("GuiService")
+        local insetLocation = guiService:GetGuiInset()
         local absPos = button.AbsolutePosition
         local absSize = button.AbsoluteSize
-        local cx = absPos.X + absSize.X / 2
-        local cy = absPos.Y + absSize.Y / 2
+        
+        -- AbsolutePosition is relative to the screen *excluding* the top bar, but SendMouseButtonEvent
+        -- is relative to the absolute screen *including* the top bar. We must add the inset.
+        local cx = absPos.X + (absSize.X / 2)
+        local cy = absPos.Y + (absSize.Y / 2) + insetLocation.Y
+        
         VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, true, game, 1)
         task.wait(0.05)
         VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, false, game, 1)
