@@ -1237,25 +1237,32 @@ local function performAutoAction()
     pendingAutoAction = true
 
     task.spawn(function()
-        -- Wait for game UI to render (battle intro animation)
-        task.wait(1.5)
+        -- Poll for battle UI buttons to appear
+        -- The battle intro animation takes 3-4s before buttons show
+        local ui = nil
+        local pollStart = tick()
+        local maxWait = 10 -- seconds max
 
-        if rareFoundPause or autoMode == "off" then
-            pendingAutoAction = false
-            return
-        end
-
-        local ui = findBattleUI()
-        if not ui then
-            log("AUTO", "Could not find battle UI")
-            addBattleLog("⚠ Auto: Battle UI not found", C.Orange)
-            -- Retry once after a bit more time
-            task.wait(1)
-            ui = findBattleUI()
-            if not ui then
+        while (tick() - pollStart) < maxWait do
+            if rareFoundPause or autoMode == "off" then
                 pendingAutoAction = false
                 return
             end
+
+            ui = findBattleUI()
+            if ui and (ui.runButton or ui.moveButtons[1]) then
+                log("AUTO", "Battle UI ready after " .. string.format("%.1f", tick() - pollStart) .. "s")
+                break
+            end
+
+            task.wait(0.5)
+        end
+
+        if not ui or (not ui.runButton and not ui.moveButtons[1]) then
+            log("AUTO", "Battle UI not found after " .. maxWait .. "s")
+            addBattleLog("⚠ Auto: Battle UI timed out", C.Orange)
+            pendingAutoAction = false
+            return
         end
 
         if autoMode == "run" then
