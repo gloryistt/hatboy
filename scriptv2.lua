@@ -1,8 +1,8 @@
 --------------------------------------------------
--- LUMIWARE V3.2 — Battle Detection Fix
+-- LUMIWARE V4 — Automation Update
+-- Battle Detection + Auto-Move/Run/Walk
 -- FORMAT: EVT(arg1="BattleEvent", arg2=sessionID,
---   arg3=subCmd, arg4=commandTable)
--- Commands: "owm"/"switch"/"player"/"start"
+--   arg3=subCmd, arg4=JSON commandTable)
 --------------------------------------------------
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -12,6 +12,7 @@ local StarterGui = game:GetService("StarterGui")
 local SoundService = game:GetService("SoundService")
 local UserInputService = game:GetService("UserInputService")
 local HttpService = game:GetService("HttpService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
 
 local player = Players.LocalPlayer
 local PLAYER_NAME = player.Name
@@ -29,7 +30,7 @@ local function logDebug(...)
     if VERBOSE_MODE then log("DEBUG", ...) end
 end
 
-log("INFO", "Initializing LumiWare v3.1 for:", PLAYER_NAME)
+log("INFO", "Initializing LumiWare v4 for:", PLAYER_NAME)
 
 --------------------------------------------------
 -- RARE LOOMIANS
@@ -43,9 +44,77 @@ local RARE_LOOMIANS = {
 }
 local customRares = {}
 
+-- LAYER 1: Name-based rare modifier detection
+-- Catches: "Gleam Dripple", "Gamma Grubby", "SA Dripple", etc.
+local RARE_MODIFIERS = {
+    "gleam", "gleaming", "gamma", "corrupt", "corrupted",
+    "alpha", "twilat", "iridescent", "metallic", "rainbow",
+    "sa ", "pn ", "hw ", "ny ",           -- event prefixes
+    "secret", "shiny", "radiant",
+}
+
 local function isRareModifier(name)
+    if type(name) ~= "string" then return false end
     local l = string.lower(name)
-    return string.find(l, "gleam") or string.find(l, "gamma") or string.find(l, "corrupt") or string.find(l, "alpha") or string.find(l, "sa ") or string.find(l, "pn ")
+    for _, mod in ipairs(RARE_MODIFIERS) do
+        if string.find(l, mod) then return true end
+    end
+    return false
+end
+
+-- LAYER 2: Deep scan ANY table/string for gleam/gamma/corrupt keywords
+-- This catches model tables like {disc="gleamdisc", ...} or {variant="gamma"}
+local RARE_KEYWORDS_DEEP = {
+    "gleam", "gamma", "corrupt", "alpha", "twilat",
+    "iridescent", "metallic", "rainbow", "shiny", "radiant", "secret",
+}
+
+local function deepScanForRare(value, depth)
+    if depth > 5 then return false end
+    depth = depth or 0
+
+    if type(value) == "string" then
+        local l = string.lower(value)
+        for _, kw in ipairs(RARE_KEYWORDS_DEEP) do
+            if string.find(l, kw) then
+                log("RARE", "Deep scan HIT: keyword=" .. kw .. " in string=" .. string.sub(value, 1, 60))
+                return true
+            end
+        end
+    elseif type(value) == "table" then
+        for k, v in pairs(value) do
+            -- Check key names for variant/gleam/type properties
+            if type(k) == "string" then
+                local kl = string.lower(k)
+                if kl == "variant" or kl == "gleam" or kl == "gamma" or kl == "corrupt"
+                    or kl == "issecret" or kl == "isgleam" or kl == "isgamma" then
+                    -- If the key is a flag and the value is truthy
+                    if v == true or v == 1 or (type(v) == "string" and v ~= "" and v ~= "false" and v ~= "0") then
+                        log("RARE", "Deep scan HIT: key=" .. k .. " val=" .. tostring(v))
+                        return true
+                    end
+                end
+            end
+            -- Recurse into all values
+            if deepScanForRare(v, depth + 1) then return true end
+        end
+    end
+    return false
+end
+
+-- LAYER 3: Scan a full command entry for any rare indicators
+-- Checks name, info string, AND all table args (model, disc, icon)
+local function scanEntryForRare(entry)
+    if type(entry) ~= "table" then return false end
+    for i = 1, #entry do
+        local v = entry[i]
+        if type(v) == "string" then
+            if isRareModifier(v) then return true end
+        elseif type(v) == "table" then
+            if deepScanForRare(v, 0) then return true end
+        end
+    end
+    return false
 end
 
 local function isRareLoomian(name)
@@ -134,6 +203,14 @@ local lastBattleTick = 0
 local raresFoundCount = 0
 local encounterHistory = {}
 local discoveryMode = false
+
+-- Automation state
+local autoMode = "off"      -- "off", "move", "run"
+local autoMoveSlot = 1       -- 1-4 move slot
+local autoWalkEnabled = false
+local autoWalkThread = nil
+local rareFoundPause = false -- pause automation on rare
+local pendingAutoAction = false -- avoid double-firing
 
 local currentBattle = {
     active = false,
@@ -231,7 +308,7 @@ local C = {
 -- MAIN FRAME
 --------------------------------------------------
 local mainFrame = Instance.new("Frame")
-mainFrame.Size = UDim2.fromOffset(460, 580)
+mainFrame.Size = UDim2.fromOffset(460, 720)
 mainFrame.Position = UDim2.fromScale(0.5, 0.5)
 mainFrame.AnchorPoint = Vector2.new(0.5, 0.5)
 mainFrame.BackgroundColor3 = C.BG
@@ -260,7 +337,7 @@ local titleLbl = Instance.new("TextLabel", topbar)
 titleLbl.Size = UDim2.new(1, -80, 1, 0)
 titleLbl.Position = UDim2.new(0, 12, 0, 0)
 titleLbl.BackgroundTransparency = 1
-titleLbl.Text = "⚡ LumiWare v3.1"
+titleLbl.Text = "⚡ LumiWare v4"
 titleLbl.Font = Enum.Font.GothamBold
 titleLbl.TextSize = 15
 titleLbl.TextColor3 = C.Accent
@@ -584,10 +661,219 @@ whSave.MouseButton1Click:Connect(function()
     end
 end)
 
--- BATTLE LOG
+-- ============================================
+-- AUTOMATION PANEL
+-- ============================================
+local autoPanel = Instance.new("Frame", contentFrame)
+autoPanel.Size = UDim2.new(1, 0, 0, 130)
+autoPanel.Position = UDim2.new(0, 0, 0, 362)
+autoPanel.BackgroundColor3 = C.Panel
+autoPanel.BorderSizePixel = 0
+Instance.new("UICorner", autoPanel).CornerRadius = UDim.new(0, 8)
+
+local autoTitle = Instance.new("TextLabel", autoPanel)
+autoTitle.Size = UDim2.new(1, -16, 0, 20)
+autoTitle.Position = UDim2.new(0, 8, 0, 4)
+autoTitle.BackgroundTransparency = 1
+autoTitle.Text = "🤖 AUTOMATION"
+autoTitle.Font = Enum.Font.GothamBold
+autoTitle.TextSize = 11
+autoTitle.TextColor3 = Color3.fromRGB(255, 120, 255)
+autoTitle.TextXAlignment = Enum.TextXAlignment.Left
+
+-- Mode label
+local modeLabel = Instance.new("TextLabel", autoPanel)
+modeLabel.Size = UDim2.new(0, 46, 0, 22)
+modeLabel.Position = UDim2.new(0, 8, 0, 26)
+modeLabel.BackgroundTransparency = 1
+modeLabel.Text = "Mode:"
+modeLabel.Font = Enum.Font.GothamBold
+modeLabel.TextSize = 11
+modeLabel.TextColor3 = C.TextDim
+modeLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+local function mkAutoBtn(parent, text, xOff, yOff, width)
+    local b = Instance.new("TextButton", parent)
+    b.Size = UDim2.fromOffset(width or 60, 22)
+    b.Position = UDim2.new(0, xOff, 0, yOff)
+    b.BackgroundColor3 = C.AccentDim
+    b.Text = text
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 10
+    b.TextColor3 = C.Text
+    b.BorderSizePixel = 0
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 5)
+    return b
+end
+
+local offBtn = mkAutoBtn(autoPanel, "OFF", 56, 26, 50)
+local moveBtn = mkAutoBtn(autoPanel, "MOVE", 112, 26, 60)
+local runBtn = mkAutoBtn(autoPanel, "RUN", 178, 26, 50)
+
+-- Move slot label + buttons
+local slotLabel = Instance.new("TextLabel", autoPanel)
+slotLabel.Size = UDim2.new(0, 70, 0, 22)
+slotLabel.Position = UDim2.new(0, 8, 0, 52)
+slotLabel.BackgroundTransparency = 1
+slotLabel.Text = "Move Slot:"
+slotLabel.Font = Enum.Font.GothamBold
+slotLabel.TextSize = 11
+slotLabel.TextColor3 = C.TextDim
+slotLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+local slotBtns = {}
+for s = 1, 4 do
+    local sb = mkAutoBtn(autoPanel, tostring(s), 78 + (s - 1) * 36, 52, 30)
+    slotBtns[s] = sb
+end
+
+-- Auto-walk toggle
+local walkBtn = mkAutoBtn(autoPanel, "🚶 AUTO-WALK: OFF", 8, 78, 140)
+local scanBtn = mkAutoBtn(autoPanel, "🔍 SCAN UI", 155, 78, 80)
+scanBtn.BackgroundColor3 = C.Orange
+
+-- Status label
+local autoStatusLbl = Instance.new("TextLabel", autoPanel)
+autoStatusLbl.Size = UDim2.new(1, -16, 0, 22)
+autoStatusLbl.Position = UDim2.new(0, 8, 0, 104)
+autoStatusLbl.BackgroundTransparency = 1
+autoStatusLbl.Text = ""
+autoStatusLbl.Font = Enum.Font.Gotham
+autoStatusLbl.TextSize = 10
+autoStatusLbl.TextColor3 = C.TextDim
+autoStatusLbl.TextXAlignment = Enum.TextXAlignment.Left
+
+local function updateAutoUI()
+    offBtn.BackgroundColor3 = autoMode == "off" and C.Red or C.AccentDim
+    moveBtn.BackgroundColor3 = autoMode == "move" and C.Green or C.AccentDim
+    runBtn.BackgroundColor3 = autoMode == "run" and C.Cyan or C.AccentDim
+    for s = 1, 4 do
+        slotBtns[s].BackgroundColor3 = (autoMoveSlot == s and autoMode == "move") and C.Accent or C.AccentDim
+    end
+    slotLabel.TextColor3 = autoMode == "move" and C.Text or C.TextDim
+    walkBtn.BackgroundColor3 = autoWalkEnabled and C.Green or C.AccentDim
+    walkBtn.Text = autoWalkEnabled and "🚶 WALKING" or "🚶 AUTO-WALK"
+    -- Status text
+    if autoMode == "off" then
+        autoStatusLbl.Text = "Automation disabled"
+    elseif autoMode == "move" then
+        autoStatusLbl.Text = "Auto-move slot " .. autoMoveSlot .. (rareFoundPause and " [PAUSED: RARE]" or "")
+    elseif autoMode == "run" then
+        autoStatusLbl.Text = "Auto-run" .. (rareFoundPause and " [PAUSED: RARE]" or "")
+    end
+end
+
+offBtn.MouseButton1Click:Connect(function()
+    autoMode = "off"
+    rareFoundPause = false
+    updateAutoUI()
+    sendNotification("LumiWare", "Automation OFF", 3)
+end)
+moveBtn.MouseButton1Click:Connect(function()
+    autoMode = "move"
+    rareFoundPause = false
+    updateAutoUI()
+    sendNotification("LumiWare", "Auto-MOVE slot " .. autoMoveSlot, 3)
+end)
+runBtn.MouseButton1Click:Connect(function()
+    autoMode = "run"
+    rareFoundPause = false
+    updateAutoUI()
+    sendNotification("LumiWare", "Auto-RUN enabled", 3)
+end)
+for s = 1, 4 do
+    slotBtns[s].MouseButton1Click:Connect(function()
+        autoMoveSlot = s
+        updateAutoUI()
+    end)
+end
+
+updateAutoUI()
+
+-- SCAN UI: dump all buttons in PlayerGui
+scanBtn.MouseButton1Click:Connect(function()
+    log("SCAN", "========== SCANNING PlayerGui ==========")
+    addBattleLog("🔍 Scanning PlayerGui for buttons...", C.Orange)
+    local pgui = player:FindFirstChild("PlayerGui")
+    if not pgui then
+        addBattleLog("⚠ PlayerGui not found", C.Red)
+        return
+    end
+
+    local btnCount = 0
+    local function scanNode(inst, path, depth)
+        if depth > 15 then return end
+        for _, child in ipairs(inst:GetChildren()) do
+            local childPath = path .. "/" .. child.Name
+            local isBtn = child:IsA("TextButton") or child:IsA("ImageButton")
+
+            if isBtn then
+                btnCount = btnCount + 1
+                local text = child:IsA("TextButton") and child.Text or "[ImageBtn]"
+                local vis = child.Visible and "V" or "H"
+                local info = string.format("[%s] %s | text=%q class=%s size=%dx%d",
+                    vis, childPath, text, child.ClassName,
+                    math.floor(child.AbsoluteSize.X), math.floor(child.AbsoluteSize.Y))
+                log("SCAN", info)
+                addBattleLog("🔘 " .. child.Name .. " | " .. text .. " [" .. vis .. "]", C.Orange)
+            end
+
+            scanNode(child, childPath, depth + 1)
+        end
+    end
+
+    scanNode(pgui, "PlayerGui", 0)
+    log("SCAN", "Total buttons found: " .. btnCount)
+    addBattleLog("🔍 Scan: " .. btnCount .. " buttons (check F9 console)", C.Orange)
+    sendNotification("LumiWare", "Scan: " .. btnCount .. " buttons found.\nCheck F9 console for full paths.", 5)
+end)
+
+-- OUTGOING REMOTE SPY: hook FireServer to see what client sends
+pcall(function()
+    local oldFire
+    if hookfunction then
+        local remoteEventMeta = getrawmetatable(Instance.new("RemoteEvent"))
+        if remoteEventMeta then
+            -- Use namecall hook instead
+        end
+    end
+
+    -- Try namecall hook (most compatible)
+    if hookmetamethod then
+        local oldNamecall
+        oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+            local method = getnamecallmethod()
+            if method == "FireServer" and self:IsA("RemoteEvent") then
+                if discoveryMode and self.Name == "EVT" then
+                    local args = {...}
+                    local parts = {}
+                    for i = 1, math.min(#args, 6) do
+                        if type(args[i]) == "string" then
+                            table.insert(parts, "arg" .. i .. '="' .. string.sub(args[i], 1, 30) .. '"')
+                        elseif type(args[i]) == "table" then
+                            table.insert(parts, "arg" .. i .. "=table")
+                        elseif type(args[i]) == "number" then
+                            table.insert(parts, "arg" .. i .. "=" .. tostring(args[i]))
+                        else
+                            table.insert(parts, "arg" .. i .. "=" .. type(args[i]))
+                        end
+                    end
+                    log("OUTGOING", ">>> " .. self.Name .. ":FireServer(" .. table.concat(parts, ", ") .. ")")
+                    addBattleLog("📤 OUT " .. self.Name .. " | " .. table.concat(parts, ", "), Color3.fromRGB(255, 180, 80))
+                end
+            end
+            return oldNamecall(self, ...)
+        end)
+        log("HOOK", "Outgoing remote spy installed (namecall)")
+    else
+        log("HOOK", "hookmetamethod not available — outgoing spy disabled")
+    end
+end)
+
+-- BATTLE LOG (shifted down)
 local blPanel = Instance.new("Frame", contentFrame)
 blPanel.Size = UDim2.new(1, 0, 0, 100)
-blPanel.Position = UDim2.new(0, 0, 0, 362)
+blPanel.Position = UDim2.new(0, 0, 0, 498)
 blPanel.BackgroundColor3 = C.Panel
 blPanel.BorderSizePixel = 0
 Instance.new("UICorner", blPanel).CornerRadius = UDim.new(0, 8)
@@ -635,10 +921,10 @@ local function addBattleLog(text, color)
     end
 end
 
--- CONTROLS
+-- CONTROLS (shifted down)
 local ctrlPanel = Instance.new("Frame", contentFrame)
 ctrlPanel.Size = UDim2.new(1, 0, 0, 36)
-ctrlPanel.Position = UDim2.new(0, 0, 0, 468)
+ctrlPanel.Position = UDim2.new(0, 0, 0, 604)
 ctrlPanel.BackgroundColor3 = C.Panel
 ctrlPanel.BorderSizePixel = 0
 Instance.new("UICorner", ctrlPanel).CornerRadius = UDim.new(0, 8)
@@ -688,7 +974,7 @@ verboseBtn.MouseButton1Click:Connect(function()
 end)
 
 -- MINIMIZE
-local fullSize = mainFrame.Size
+local fullSize = UDim2.fromOffset(460, 720)
 minBtn.MouseButton1Click:Connect(function()
     isMinimized = not isMinimized
     if isMinimized then
@@ -714,6 +1000,7 @@ task.spawn(function()
         task.wait(1)
     end
 end)
+-- SESSION WEBHOOK
 task.spawn(function()
     local lastMs = 0
     while gui.Parent do
@@ -724,6 +1011,240 @@ task.spawn(function()
         task.wait(5)
     end
 end)
+
+--------------------------------------------------
+-- AUTO-WALK: Circle Movement
+--------------------------------------------------
+local function startAutoWalk()
+    if autoWalkThread then return end
+    autoWalkThread = task.spawn(function()
+        log("INFO", "Auto-walk started")
+        local char = player.Character or player.CharacterAdded:Wait()
+        local humanoid = char:WaitForChild("Humanoid")
+        local rootPart = char:WaitForChild("HumanoidRootPart")
+        local center = rootPart.Position
+        local radius = 15
+        local numPoints = 8
+        local pointIndex = 0
+
+        while autoWalkEnabled and gui.Parent do
+            -- Pause during battles
+            if battleState == "active" then
+                task.wait(0.5)
+            else
+                -- Refresh character reference
+                char = player.Character
+                if not char then task.wait(1)
+                else
+                    humanoid = char:FindFirstChild("Humanoid")
+                    rootPart = char:FindFirstChild("HumanoidRootPart")
+                    if not humanoid or not rootPart or humanoid.Health <= 0 then
+                        task.wait(1)
+                    else
+                        -- Calculate next waypoint in circle
+                        local angle = (pointIndex / numPoints) * math.pi * 2
+                        local targetPos = center + Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius)
+                        pointIndex = (pointIndex + 1) % numPoints
+
+                        humanoid:MoveTo(targetPos)
+
+                        -- Wait for move to complete or timeout
+                        local moveStart = tick()
+                        local reached = false
+                        local conn
+                        conn = humanoid.MoveToFinished:Connect(function()
+                            reached = true
+                        end)
+                        while not reached and (tick() - moveStart) < 4 and autoWalkEnabled do
+                            task.wait(0.1)
+                        end
+                        if conn then conn:Disconnect() end
+                        task.wait(0.2)
+                    end
+                end
+            end
+        end
+        log("INFO", "Auto-walk stopped")
+    end)
+end
+
+local function stopAutoWalk()
+    autoWalkEnabled = false
+    if autoWalkThread then
+        pcall(function() task.cancel(autoWalkThread) end)
+        autoWalkThread = nil
+    end
+    pcall(function()
+        local char = player.Character
+        if char then
+            local h = char:FindFirstChild("Humanoid")
+            local rp = char:FindFirstChild("HumanoidRootPart")
+            if h and rp then h:MoveTo(rp.Position) end
+        end
+    end)
+end
+
+walkBtn.MouseButton1Click:Connect(function()
+    autoWalkEnabled = not autoWalkEnabled
+    updateAutoUI()
+    if autoWalkEnabled then
+        startAutoWalk()
+        sendNotification("LumiWare", "Auto-walk ON — walking in circles", 3)
+        addBattleLog("🚶 Auto-walk ON", C.Green)
+    else
+        stopAutoWalk()
+        sendNotification("LumiWare", "Auto-walk OFF", 3)
+        addBattleLog("🚶 Auto-walk OFF", C.TextDim)
+    end
+end)
+
+--------------------------------------------------
+-- AUTO-BATTLE: Find & Click Game UI Buttons
+--------------------------------------------------
+local function findBattleUI()
+    local pgui = player:FindFirstChild("PlayerGui")
+    if not pgui then return nil end
+
+    local result = {
+        runButton = nil,
+        fightButton = nil,
+        moveButtons = {},
+    }
+
+    local function searchUI(parent, depth)
+        if depth > 12 then return end
+        for _, child in ipairs(parent:GetChildren()) do
+            if child:IsA("TextButton") or child:IsA("ImageButton") then
+                local text = ""
+                if child:IsA("TextButton") then text = string.lower(child.Text) end
+                local cname = child.Name:lower()
+
+                -- Run button
+                if text == "run" or cname == "run" or string.find(cname, "runbtn") or string.find(cname, "flee") then
+                    if child.Visible ~= false then result.runButton = child end
+                end
+
+                -- Fight button
+                if text == "fight" or cname == "fight" or string.find(cname, "fightbtn") or string.find(cname, "attack") then
+                    if child.Visible ~= false then result.fightButton = child end
+                end
+            end
+
+            -- Move buttons container
+            if child:IsA("Frame") or child:IsA("ScrollingFrame") then
+                local cname = child.Name:lower()
+                if string.find(cname, "move") or string.find(cname, "skill") or string.find(cname, "attack") then
+                    local moveIdx = 0
+                    for _, mBtn in ipairs(child:GetChildren()) do
+                        if mBtn:IsA("TextButton") or mBtn:IsA("ImageButton") then
+                            moveIdx = moveIdx + 1
+                            result.moveButtons[moveIdx] = mBtn
+                        end
+                    end
+                end
+            end
+
+            searchUI(child, depth + 1)
+        end
+    end
+
+    searchUI(pgui, 0)
+    return result
+end
+
+local function clickButton(button)
+    if not button then return false end
+    local success = false
+    pcall(function()
+        -- Method 1: fireclick (common executor function)
+        if fireclick then
+            fireclick(button)
+            success = true
+            return
+        end
+        -- Method 2: firesignal
+        if firesignal then
+            firesignal(button.MouseButton1Click)
+            success = true
+            return
+        end
+        -- Method 3: VirtualInputManager
+        local absPos = button.AbsolutePosition
+        local absSize = button.AbsoluteSize
+        local cx = absPos.X + absSize.X / 2
+        local cy = absPos.Y + absSize.Y / 2
+        VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, true, game, 1)
+        task.wait(0.05)
+        VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, false, game, 1)
+        success = true
+    end)
+    return success
+end
+
+local function performAutoAction()
+    if autoMode == "off" or rareFoundPause or pendingAutoAction then return end
+    if currentBattle.battleType ~= "Wild" then return end
+
+    pendingAutoAction = true
+
+    task.spawn(function()
+        -- Wait for game UI to render
+        task.wait(1.5)
+
+        if rareFoundPause or autoMode == "off" then
+            pendingAutoAction = false
+            return
+        end
+
+        local ui = findBattleUI()
+        if not ui then
+            log("AUTO", "Could not find battle UI")
+            addBattleLog("⚠ Auto: Battle UI not found", C.Orange)
+            pendingAutoAction = false
+            return
+        end
+
+        if autoMode == "run" then
+            if ui.runButton then
+                log("AUTO", "Auto-RUN: clicking run button")
+                addBattleLog("🤖 Auto-RUN ▸ fleeing", C.Cyan)
+                clickButton(ui.runButton)
+            else
+                addBattleLog("⚠ Auto: Run button not found", C.Orange)
+            end
+        elseif autoMode == "move" then
+            -- Click Fight first to open move menu
+            if ui.fightButton then
+                log("AUTO", "Auto-MOVE: clicking fight button")
+                clickButton(ui.fightButton)
+                task.wait(0.8)
+
+                -- Re-scan for move buttons
+                local ui2 = findBattleUI()
+                if ui2 and ui2.moveButtons[autoMoveSlot] then
+                    log("AUTO", "Auto-MOVE: clicking move slot " .. autoMoveSlot)
+                    addBattleLog("🤖 Auto-MOVE ▸ slot " .. autoMoveSlot, C.Green)
+                    clickButton(ui2.moveButtons[autoMoveSlot])
+                elseif ui2 then
+                    -- Fallback: click any available move
+                    for s = 1, 4 do
+                        if ui2.moveButtons[s] then
+                            addBattleLog("🤖 Auto-MOVE ▸ slot " .. s .. " (fallback)", C.Green)
+                            clickButton(ui2.moveButtons[s])
+                            break
+                        end
+                    end
+                else
+                    addBattleLog("⚠ Auto: Move buttons not found", C.Orange)
+                end
+            else
+                addBattleLog("⚠ Auto: Fight button not found", C.Orange)
+            end
+        end
+
+        pendingAutoAction = false
+    end)
+end
 
 --------------------------------------------------
 -- BATTLE PROCESSING (THE CORE FIX)
@@ -820,6 +1341,7 @@ local function processBattleCommands(commandTable)
     end
 
     -- Process "owm" and "switch" commands (Loomian data)
+    -- ALSO: deep scan each enemy entry for gleam/corrupt/gamma
     for _, entry in pairs(commandTable) do
         if type(entry) == "table" and type(entry[1]) == "string" then
             local cmdL = string.lower(entry[1])
@@ -832,16 +1354,17 @@ local function processBattleCommands(commandTable)
                     if side == "p2" then
                         currentBattle.enemy = displayName
                         currentBattle.enemyStats = stats
+                        currentBattle.enemyRawEntry = entry  -- save for deep scan
                         log("BATTLE", "    -> ENEMY: " .. displayName)
                     elseif side == "p1" then
                         currentBattle.player = displayName
                         currentBattle.playerStats = stats
                         log("BATTLE", "    -> PLAYER: " .. displayName)
                     else
-                        -- No side detected, use position
                         if not currentBattle.enemy then
                             currentBattle.enemy = displayName
                             currentBattle.enemyStats = stats
+                            currentBattle.enemyRawEntry = entry
                         elseif not currentBattle.player then
                             currentBattle.player = displayName
                             currentBattle.playerStats = stats
@@ -849,7 +1372,6 @@ local function processBattleCommands(commandTable)
                     end
                 else
                     log("BATTLE", "  " .. entry[1] .. ": FAILED to extract name")
-                    -- Emergency dump of this entry
                     for idx = 1, math.min(#entry, 6) do
                         log("BATTLE", "    [" .. idx .. "] type=" .. type(entry[idx]) .. " val=" .. tostring(entry[idx]))
                     end
@@ -909,15 +1431,28 @@ local function processBattleCommands(commandTable)
             if #encounterHistory > 10 then table.remove(encounterHistory, 11) end
         end
 
+        -- MULTI-LAYER RARE CHECK:
+        -- 1. Is the enemy name in the rare list?
+        -- 2. Does the name contain a rare modifier (gleam/gamma/etc)?
+        -- 3. Deep scan the raw command entry (model tables, disc names, etc.)
         local rareFound = isRareLoomian(enemyName) or isRareModifier(enemyName)
+        if not rareFound and currentBattle.enemyRawEntry then
+            rareFound = scanEntryForRare(currentBattle.enemyRawEntry)
+            if rareFound then
+                log("RARE", "!!! DEEP SCAN caught rare in model/disc data !!!")
+            end
+        end
         if rareFound then
             enemyLbl.Text = 'Enemy: <font color="#FFD700">⭐ ' .. enemyName .. ' (RARE!)</font>'
             addBattleLog("⭐ RARE: " .. enemyName, C.Gold)
+            -- PAUSE automation on rare!
+            rareFoundPause = true
+            updateAutoUI()
             if currentEnemy ~= enemyName then
                 currentEnemy = enemyName
                 raresFoundCount = raresFoundCount + 1
                 playRareSound()
-                sendNotification("⭐ LumiWare", "RARE: " .. enemyName .. "!", 10)
+                sendNotification("⭐ LumiWare", "RARE: " .. enemyName .. "! Automation PAUSED.", 10)
                 addRareLog(enemyName, currentBattle.enemyStats and ("Lv." .. tostring(currentBattle.enemyStats.level)) or nil)
                 sendRareWebhook(enemyName, currentBattle.enemyStats and currentBattle.enemyStats.level,
                     currentBattle.enemyStats and currentBattle.enemyStats.gender or "?",
@@ -927,6 +1462,10 @@ local function processBattleCommands(commandTable)
             enemyLbl.Text = "Enemy: " .. enemyName
             addBattleLog(currentBattle.battleType .. ": " .. enemyName, C.TextDim)
             currentEnemy = nil
+            -- Trigger auto-action on non-rare wild encounter
+            if currentBattle.battleType == "Wild" and autoMode ~= "off" and not rareFoundPause then
+                performAutoAction()
+            end
         end
     end
 
@@ -1120,5 +1659,5 @@ pcall(function()
 end)
 
 addBattleLog("Hooked " .. hookedCount .. " remotes — READY", C.Green)
-log("INFO", "LumiWare v3.2 READY | Hooked " .. hookedCount .. " | Player: " .. PLAYER_NAME)
-sendNotification("⚡ LumiWare v3.2", "Hooked " .. hookedCount .. " remotes. Battle detection active.", 6)
+log("INFO", "LumiWare v4 READY | Hooked " .. hookedCount .. " | Player: " .. PLAYER_NAME)
+sendNotification("⚡ LumiWare v4", "Hooked " .. hookedCount .. " remotes.\nBattle detection + automation ready.", 6)
