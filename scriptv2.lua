@@ -1503,6 +1503,13 @@ end)
 --   PlayerGui/MainGui/Frame/BattleGui/Move4/Button
 -- All are ImageButtons.
 --------------------------------------------------
+local function isVisible(obj)
+    if not obj then return false end
+    if obj:IsA("GuiObject") and not obj.Visible then return false end
+    if obj.Parent and obj.Parent:IsA("GuiObject") and not obj.Parent.Visible then return false end
+    return true
+end
+
 local function findBattleUI()
     local pgui = player:FindFirstChild("PlayerGui")
     if not pgui then
@@ -1563,30 +1570,36 @@ local function findBattleUI()
 
     -- Run button: BattleGui/Run/Button
     local runContainer = battleGui:FindFirstChild("Run")
-    if runContainer then
+    if runContainer and isVisible(runContainer) then
         local runBtn = runContainer:FindFirstChild("Button")
-        if runBtn then
+        if runBtn and isVisible(runBtn) then
             result.runButton = runBtn
         end
     end
 
-    -- Fight button: BattleGui/Fight/Button or first ImageLabel with Button
+    -- Fight button: BattleGui/Fight/Button
     local fightContainer = battleGui:FindFirstChild("Fight")
-    if fightContainer then
+    if fightContainer and isVisible(fightContainer) then
         local fBtn = fightContainer:FindFirstChild("Button")
-        if fBtn then
+        if fBtn and isVisible(fBtn) then
             result.fightButton = fBtn
         end
     end
-    -- Fallback: scan all direct children for Fight-like containers
+    -- Fallback: scan all direct children for Fight-like containers OR unnamed ImageLabels
     if not result.fightButton then
         for _, child in ipairs(battleGui:GetChildren()) do
-            local cname = child.Name:lower()
-            if cname == "fight" or string.find(cname, "fight") or string.find(cname, "attack") then
-                local btn = child:FindFirstChild("Button")
-                if btn then
-                    result.fightButton = btn
-                    break
+            if isVisible(child) then
+                local cname = child.Name:lower()
+                -- It's either explicitly named "fight/attack" OR it's just an ImageLabel containing a Button, 
+                -- but NOT one of the known others (Run, Bag, Loomians, Items)
+                if cname == "fight" or string.find(cname, "fight") or string.find(cname, "attack") or 
+                   (child:IsA("ImageLabel") and cname ~= "run" and cname ~= "bag" and cname ~= "loomians" and cname ~= "items") then
+                    
+                    local btn = child:FindFirstChild("Button")
+                    if btn and isVisible(btn) then
+                        result.fightButton = btn
+                        break
+                    end
                 end
             end
         end
@@ -1595,9 +1608,9 @@ local function findBattleUI()
     -- Move buttons: BattleGui/Move1/Button through Move4/Button
     for i = 1, 4 do
         local moveContainer = battleGui:FindFirstChild("Move" .. i)
-        if moveContainer then
+        if moveContainer and isVisible(moveContainer) then
             local moveBtn = moveContainer:FindFirstChild("Button")
-            if moveBtn then
+            if moveBtn and isVisible(moveBtn) then
                 result.moveButtons[i] = moveBtn
             end
         end
@@ -1609,11 +1622,6 @@ local function findBattleUI()
     if result.fightButton then table.insert(parts, "Fight") end
     table.insert(parts, #result.moveButtons .. " moves")
     log("AUTO", "  Found: " .. table.concat(parts, ", "))
-
-    -- Also log all BattleGui children for debugging
-    for _, ch in ipairs(battleGui:GetChildren()) do
-        logDebug("  BattleGui/" .. ch.Name .. " (" .. ch.ClassName .. ")")
-    end
 
     return result
 end
@@ -1658,7 +1666,7 @@ local function performAutoAction()
         -- Poll for battle UI buttons to appear
         local ui = nil
         local pollStart = tick()
-        local maxWait = 10
+        local maxWait = 30
 
         while (tick() - pollStart) < maxWait do
             if rareFoundPause or autoMode == "off" then
@@ -1672,7 +1680,7 @@ local function performAutoAction()
                 break
             end
 
-            task.wait(0.5)
+            task.wait(0.1)
         end
 
         if not ui or (not ui.runButton and not ui.fightButton) then
