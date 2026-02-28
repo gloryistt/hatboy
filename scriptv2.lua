@@ -1542,13 +1542,34 @@ local function isVisible(obj)
 end
 
 local cachedMoveNames = {}
+local cachedBattleGui = nil -- Persistent reference to avoid re-traversing GUI tree
+
+local function getBattleGui()
+    -- Check if our cached reference is still valid
+    if cachedBattleGui and cachedBattleGui.Parent then
+        return cachedBattleGui
+    end
+    cachedBattleGui = nil
+    
+    local pgui = player:FindFirstChild("PlayerGui")
+    if not pgui then return nil end
+    
+    local mainGui = pgui:FindFirstChild("MainGui")
+    if not mainGui then return nil end
+    
+    local frame = mainGui:FindFirstChild("Frame")
+    if not frame then return nil end
+    
+    local bg = frame:FindFirstChild("BattleGui")
+    if bg then
+        cachedBattleGui = bg
+    end
+    return bg
+end
 
 local function findBattleUI()
-    local pgui = player:FindFirstChild("PlayerGui")
-    if not pgui then
-        log("AUTO", "findBattleUI: no PlayerGui")
-        return nil
-    end
+    local battleGui = getBattleGui()
+    if not battleGui then return nil end
 
     local result = {
         runButton = nil,
@@ -1557,90 +1578,64 @@ local function findBattleUI()
         moveNames = {},
     }
 
-    -- METHOD 1: Direct Path (Fastest, ~0ms)
-    local battleGui = pgui:FindFirstChild("MainGui") 
-    if battleGui then
-        battleGui = battleGui:FindFirstChild("Frame")
-        if battleGui then
-            battleGui = battleGui:FindFirstChild("BattleGui")
-        end
-    end
-
-    -- METHOD 2: Shallow Search Fallback (Only fires if direct path fails)
-    if not battleGui then
-        local mainGui = pgui:FindFirstChild("MainGui")
-        if mainGui then
-            local frame = mainGui:FindFirstChild("Frame") or mainGui:FindFirstChild("Frame", true)
-            if frame then
-                battleGui = frame:FindFirstChild("BattleGui")
+    -- Run button: direct property access (no isVisible wrapper overhead)
+    local runC = battleGui:FindFirstChild("Run")
+    if runC then
+        local vis = true
+        pcall(function() vis = runC.Visible end)
+        if vis then
+            local btn = runC:FindFirstChild("Button")
+            if btn then
+                local bvis = true
+                pcall(function() bvis = btn.Visible end)
+                if bvis then result.runButton = btn end
             end
         end
     end
 
-    if not battleGui then
-        return nil
-    end
-
-    -- Run button: BattleGui/Run/Button
-    local runContainer = battleGui:FindFirstChild("Run")
-    if runContainer and isVisible(runContainer) then
-        local runBtn = runContainer:FindFirstChild("Button")
-        if runBtn and isVisible(runBtn) then
-            result.runButton = runBtn
-        end
-    end
-
-    -- Fight button: BattleGui/Fight/Button
-    local fightContainer = battleGui:FindFirstChild("Fight")
-    if fightContainer and isVisible(fightContainer) then
-        local fBtn = fightContainer:FindFirstChild("Button")
-        if fBtn and isVisible(fBtn) then
-            result.fightButton = fBtn
-        end
-    end
-    -- Fallback: scan all direct children for Fight-like containers OR unnamed ImageLabels
-    if not result.fightButton then
-        for _, child in ipairs(battleGui:GetChildren()) do
-            if isVisible(child) then
-                local cname = child.Name:lower()
-                -- It's either explicitly named "fight/attack" OR it's just an ImageLabel containing a Button, 
-                -- but NOT one of the known others (Run, Bag, Loomians, Items, or Moves)
-                if cname == "fight" or string.find(cname, "fight") or string.find(cname, "attack") or 
-                   (child:IsA("ImageLabel") and cname ~= "run" and cname ~= "bag" and cname ~= "loomians" and cname ~= "items" and not string.find(cname, "move")) then
-                    
-                    local btn = child:FindFirstChild("Button")
-                    if btn and isVisible(btn) then
-                        result.fightButton = btn
-                        break
-                    end
-                end
+    -- Fight button: direct property access
+    local fightC = battleGui:FindFirstChild("Fight")
+    if fightC then
+        local vis = true
+        pcall(function() vis = fightC.Visible end)
+        if vis then
+            local btn = fightC:FindFirstChild("Button")
+            if btn then
+                local bvis = true
+                pcall(function() bvis = btn.Visible end)
+                if bvis then result.fightButton = btn end
             end
         end
     end
 
-    -- Move buttons: BattleGui/Move1/Button through Move4/Button
-    -- OPTIMIZATION: directly access children without FindFirstChild where possible if they exist
+    -- Move buttons: unrolled loop for speed (no string concat "Move"..i per call)
+    local moveNames = {"Move1", "Move2", "Move3", "Move4"}
     for i = 1, 4 do
-        local moveContainer = battleGui:FindFirstChild("Move" .. i)
-        if moveContainer and moveContainer.Visible then
-            local moveBtn = moveContainer:FindFirstChild("Button")
-            if moveBtn and moveBtn.Visible then
-                result.moveButtons[i] = moveBtn
-                
-                -- Fast text extraction: only search for text if we haven't cached it yet for this battle
-                -- (Move names don't change mid-battle, so we only need to read the UI text once)
-                if not cachedMoveNames[i] then
-                    local txt = moveContainer:FindFirstChildOfClass("TextLabel")
-                    if not txt then
-                        txt = moveBtn:FindFirstChildOfClass("TextLabel")
-                    end
-                    if txt and txt.Text and txt.Text ~= "" then
-                        cachedMoveNames[i] = txt.Text:lower()
+        local mc = battleGui:FindFirstChild(moveNames[i])
+        if mc then
+            local vis = true
+            pcall(function() vis = mc.Visible end)
+            if vis then
+                local btn = mc:FindFirstChild("Button")
+                if btn then
+                    local bvis = true
+                    pcall(function() bvis = btn.Visible end)
+                    if bvis then
+                        result.moveButtons[i] = btn
+                        if not cachedMoveNames[i] then
+                            local txt = mc:FindFirstChildOfClass("TextLabel")
+                            if not txt then txt = btn:FindFirstChildOfClass("TextLabel") end
+                            if txt then
+                                pcall(function()
+                                    if txt.Text and txt.Text ~= "" then
+                                        cachedMoveNames[i] = txt.Text:lower()
+                                    end
+                                end)
+                            end
+                        end
+                        result.moveNames[i] = cachedMoveNames[i]
                     end
                 end
-                
-                -- Always assign the cached or newly found name to the result
-                result.moveNames[i] = cachedMoveNames[i]
             end
         end
     end
@@ -1650,36 +1645,55 @@ end
 
 local function clickButton(button)
     if not button then return false end
-    local success = false
-    pcall(function()
-        -- Method 1: fireclick (common executor function)
+    
+    -- Method 1: fireclick (common executor function)
+    local ok1 = pcall(function()
         if fireclick then
             fireclick(button)
-            success = true
-            return
         end
-        -- Method 2: firesignal
+    end)
+    if ok1 and fireclick then return true end
+    
+    -- Method 2: firesignal on MouseButton1Click
+    local ok2 = pcall(function()
         if firesignal then
             firesignal(button.MouseButton1Click)
-            success = true
-            return
         end
-        -- Method 3: VirtualInputManager
-        local guiService = game:GetService("GuiService")
-        local insetLocation = guiService:GetGuiInset()
-        local absPos = button.AbsolutePosition
-        local absSize = button.AbsoluteSize
-        
-        -- AbsolutePosition is relative to the screen *excluding* the top bar, but SendMouseButtonEvent
-        -- is relative to the absolute screen *including* the top bar. We must add the inset.
-        local cx = absPos.X + (absSize.X / 2)
-        local cy = absPos.Y + (absSize.Y / 2) + insetLocation.Y
-        
-        VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, true, game, 1)
-        VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, false, game, 1)
-        success = true
     end)
-    return success
+    if ok2 and firesignal then return true end
+    
+    -- Method 3: Direct :Fire() on MouseButton1Click (some executors allow this)
+    local ok3 = pcall(function()
+        button.MouseButton1Click:Fire()
+    end)
+    if ok3 then return true end
+    
+    -- Method 4: VirtualInputManager with GuiInset offset
+    local ok4 = pcall(function()
+        local inset = game:GetService("GuiService"):GetGuiInset()
+        local pos = button.AbsolutePosition
+        local sz = button.AbsoluteSize
+        local cx = pos.X + (sz.X / 2)
+        local cy = pos.Y + (sz.Y / 2) + inset.Y
+        VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, true, game, 1)
+        task.wait(0.05)
+        VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, false, game, 1)
+    end)
+    if ok4 then return true end
+    
+    -- Method 5: VirtualInputManager WITHOUT GuiInset (some executors already include it)
+    local ok5 = pcall(function()
+        local pos = button.AbsolutePosition
+        local sz = button.AbsoluteSize
+        local cx = pos.X + (sz.X / 2)
+        local cy = pos.Y + (sz.Y / 2)
+        VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, true, game, 1)
+        task.wait(0.05)
+        VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, false, game, 1)
+    end)
+    if ok5 then return true end
+    
+    return false
 end
 
 local function performAutoAction()
@@ -1690,7 +1704,9 @@ local function performAutoAction()
     log("AUTO", "performAutoAction triggered, mode=" .. autoMode)
 
     task.spawn(function()
-        -- Poll for battle UI buttons to appear
+        local heartbeat = game:GetService("RunService").Heartbeat
+        
+        -- Poll for battle UI buttons to appear (fires EVERY engine frame, ~16ms)
         local ui = nil
         local pollStart = tick()
         local maxWait = 30
@@ -1704,15 +1720,13 @@ local function performAutoAction()
             ui = findBattleUI()
             if ui then
                 if autoMode == "run" and ui.runButton then
-                    log("AUTO", "Battle UI ready for RUN after " .. string.format("%.1f", tick() - pollStart) .. "s")
                     break
                 elseif ui.runButton or ui.fightButton then
-                    log("AUTO", "Battle UI ready after " .. string.format("%.1f", tick() - pollStart) .. "s")
                     break
                 end
             end
 
-            task.wait(0.1)
+            heartbeat:Wait() -- ~16ms per frame, 6x faster than task.wait(0.1)
         end
 
         if not ui or (not ui.runButton and not ui.fightButton) then
@@ -1748,7 +1762,7 @@ local function performAutoAction()
                     if rareFoundPause or autoMode ~= "move" then break end
                     turnUI = findBattleUI()
                     if turnUI and (turnUI.fightButton or #turnUI.moveButtons > 0) then break end
-                    task.wait(0.1)
+                    heartbeat:Wait() -- Frame-level polling
                 end
 
                 if not turnUI or (not turnUI.fightButton and #turnUI.moveButtons == 0) then
@@ -1769,11 +1783,9 @@ local function performAutoAction()
                     local moveUI = nil
                     local moveStart = tick()
                     while (tick() - moveStart) < 5 do
-                        task.wait(0.05) -- Very fast poll
+                        heartbeat:Wait() -- Frame-level polling
                         moveUI = findBattleUI()
-                        -- Explicitly wait ONLY for moves to appear. Don't worry about if Fight is "gone" yet.
                         if moveUI and (#moveUI.moveButtons > 0) then
-                            -- Instant break, no wait! 
                             break
                         end
                     end
@@ -1860,26 +1872,23 @@ local function performAutoAction()
                     if not vUI or #vUI.moveButtons == 0 then
                         break
                     end
-                    task.wait(0.05)
+                    heartbeat:Wait()
                 end
 
                 -- Now wait for the animations to finish and the next turn to start
                 local waitStart = tick()
                 local battleEnded = false
-                while (tick() - waitStart) < 30 do -- Increased timeout for long attack animations
+                while (tick() - waitStart) < 30 do
                     if rareFoundPause or autoMode ~= "move" then break end
                     local checkUI = findBattleUI()
                     if checkUI and (checkUI.fightButton or checkUI.runButton) then
-                        log("AUTO", "Next turn ready")
                         break
                     elseif not checkUI and (tick() - waitStart) > 5 then
-                        -- Check if we're actually back in the overworld (battle over)
                         if player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
-                            -- Simple heuristic: if we've been waiting 5+ seconds without UI, and we have our character, battle is probably over
-                            -- We will let the main loop re-verify
+                            -- 5+ seconds with no UI and character present = battle likely over
                         end
                     end
-                    task.wait(0.2)
+                    heartbeat:Wait()
                 end
 
                 -- Check if battle ended
