@@ -1676,7 +1676,6 @@ local function clickButton(button)
         local cy = absPos.Y + (absSize.Y / 2) + insetLocation.Y
         
         VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, true, game, 1)
-        task.wait(0.05)
         VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, false, game, 1)
         success = true
     end)
@@ -1766,14 +1765,14 @@ local function performAutoAction()
                     end
                     clickButton(turnUI.fightButton)
 
-                    -- STEP 2: Wait for move buttons to appear (and Fight button to vanish)
+                    -- STEP 2: Wait for move buttons to appear
                     local moveUI = nil
                     local moveStart = tick()
                     while (tick() - moveStart) < 5 do
                         task.wait(0.05) -- Very fast poll
                         moveUI = findBattleUI()
-                        -- Explicitly wait for the Fight button to disappear AND moves to appear
-                        if moveUI and not moveUI.fightButton and (#moveUI.moveButtons > 0) then
+                        -- Explicitly wait ONLY for moves to appear. Don't worry about if Fight is "gone" yet.
+                        if moveUI and (#moveUI.moveButtons > 0) then
                             -- Instant break, no wait! 
                             break
                         end
@@ -1858,7 +1857,7 @@ local function performAutoAction()
                 local vanishStart = tick()
                 while (tick() - vanishStart) < 5 do
                     local vUI = findBattleUI()
-                    if not vUI or (#vUI.moveButtons == 0 and not vUI.fightButton) then
+                    if not vUI or #vUI.moveButtons == 0 then
                         break
                     end
                     task.wait(0.05)
