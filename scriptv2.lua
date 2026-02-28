@@ -1695,37 +1695,61 @@ local function findBattleUI()
     return result
 end
 
--- v4.1: Fire ALL click methods for Xeno executor compatibility
+-- v4.2: Ultra-fast clicking — getconnections > firesignal > fireclick > VIM
 local function clickButton(button)
     if not button then return false end
     
-    -- FAST PATH: firesignal (instant, no delays) - try all signal variants
-    local signalFired = false
-    if firesignal then
-        -- Try every possible signal on button and its parent
-        pcall(function() firesignal(button.MouseButton1Click) end)
-        pcall(function() firesignal(button, "MouseButton1Click") end)
-        pcall(function() firesignal(button.Activated) end)
-        pcall(function() firesignal(button, "Activated") end)
+    -- METHOD 1 (BEST): getconnections — directly fire every connected callback
+    local gcFired = false
+    if getconnections then
         pcall(function()
-            if button.Parent then
-                firesignal(button.Parent.MouseButton1Click)
-                firesignal(button.Parent, "MouseButton1Click")
+            for _, conn in ipairs(getconnections(button.MouseButton1Click)) do
+                pcall(function() conn:Fire() end)
+                gcFired = true
             end
         end)
-        signalFired = true
+        pcall(function()
+            for _, conn in ipairs(getconnections(button.Activated)) do
+                pcall(function() conn:Fire() end)
+                gcFired = true
+            end
+        end)
+        -- Also fire parent's signals (some UIs wrap the button)
+        if button.Parent then
+            pcall(function()
+                for _, conn in ipairs(getconnections(button.Parent.MouseButton1Click)) do
+                    pcall(function() conn:Fire() end)
+                    gcFired = true
+                end
+            end)
+            pcall(function()
+                for _, conn in ipairs(getconnections(button.Parent.Activated)) do
+                    pcall(function() conn:Fire() end)
+                    gcFired = true
+                end
+            end)
+        end
+    end
+    if gcFired then return true end
+    
+    -- METHOD 2: firesignal
+    local sigFired = false
+    if firesignal then
+        pcall(function() firesignal(button.MouseButton1Click); sigFired = true end)
+        pcall(function() firesignal(button.Activated); sigFired = true end)
+        if button.Parent then
+            pcall(function() firesignal(button.Parent.MouseButton1Click); sigFired = true end)
+        end
+    end
+    if sigFired then return true end
+    
+    -- METHOD 3: fireclick
+    if fireclick then
+        pcall(function() fireclick(button) end)
+        return true
     end
     
-    -- fireclick (also instant)
-    pcall(function()
-        if fireclick then fireclick(button); signalFired = true end
-    end)
-    
-    -- If signal methods worked, return IMMEDIATELY (no VIM delay!)
-    if signalFired then return true end
-    
-    -- SLOW PATH: VirtualInputManager (only if no signal methods exist)
-    -- Run async so it doesn't block
+    -- METHOD 4 (SLOWEST): VirtualInputManager — only if nothing else exists
     task.spawn(function()
         pcall(function()
             local p, s = button.AbsolutePosition, button.AbsoluteSize
@@ -1841,14 +1865,23 @@ local function performAutoAction()
                     end
                     clickButton(turnUI.fightButton)
 
-                    -- STEP 2: Wait for move buttons to appear
+                    -- STEP 2: Wait for move buttons — RETRY Fight click every 0.3s if they don't appear
                     local moveUI = nil
                     local moveStart = tick()
-                    while (tick() - moveStart) < 5 do
-                        heartbeat:Wait() -- Frame-level polling
+                    local lastRetry = moveStart
+                    while (tick() - moveStart) < 3 do
+                        heartbeat:Wait()
                         moveUI = findBattleUI()
                         if moveUI and hasAnyMove(moveUI) then
                             break
+                        end
+                        -- Retry clicking Fight every 0.3s in case the first click didn't register
+                        if (tick() - lastRetry) >= 0.3 then
+                            lastRetry = tick()
+                            local retryUI = findBattleUI()
+                            if retryUI and retryUI.fightButton and not hasAnyMove(retryUI) then
+                                clickButton(retryUI.fightButton)
+                            end
                         end
                     end
 
@@ -1927,12 +1960,29 @@ local function performAutoAction()
                     end
                 end
 
-                -- Wait for the UI to disappear (meaning the move was selected and animations are starting)
+                -- Wait for the UI to disappear (move was selected) — retry move click if it's still showing
                 local vanishStart = tick()
-                while (tick() - vanishStart) < 5 do
+                local lastMoveRetry = vanishStart
+                while (tick() - vanishStart) < 2 do
                     local vUI = findBattleUI()
                     if not vUI or not hasAnyMove(vUI) then
                         break
+                    end
+                    -- Retry the move click every 0.3s if the move panel is still showing
+                    if (tick() - lastMoveRetry) >= 0.3 and vUI then
+                        lastMoveRetry = tick()
+                        local retrySlot = tonumber(autoMoveSlot) or 1
+                        retrySlot = math.clamp(retrySlot, 1, 4)
+                        if vUI.moveButtons[retrySlot] then
+                            clickButton(vUI.moveButtons[retrySlot])
+                        else
+                            for s = 1, 4 do
+                                if vUI.moveButtons[s] then
+                                    clickButton(vUI.moveButtons[s])
+                                    break
+                                end
+                            end
+                        end
                     end
                     heartbeat:Wait()
                 end
