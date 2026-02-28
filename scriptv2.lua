@@ -1557,8 +1557,25 @@ local function findBattleUI()
         moveNames = {},
     }
 
-    -- METHOD 1: Fast Recursive search (Fastest for deeply nested dynamic GUI)
-    local battleGui = pgui:FindFirstChild("BattleGui", true)
+    -- METHOD 1: Direct Path (Fastest, ~0ms)
+    local battleGui = pgui:FindFirstChild("MainGui") 
+    if battleGui then
+        battleGui = battleGui:FindFirstChild("Frame")
+        if battleGui then
+            battleGui = battleGui:FindFirstChild("BattleGui")
+        end
+    end
+
+    -- METHOD 2: Shallow Search Fallback (Only fires if direct path fails)
+    if not battleGui then
+        local mainGui = pgui:FindFirstChild("MainGui")
+        if mainGui then
+            local frame = mainGui:FindFirstChild("Frame") or mainGui:FindFirstChild("Frame", true)
+            if frame then
+                battleGui = frame:FindFirstChild("BattleGui")
+            end
+        end
+    end
 
     if not battleGui then
         return nil
@@ -1756,6 +1773,7 @@ local function performAutoAction()
 
                     if moveUI and (#moveUI.moveButtons > 0) then
                         local targetSlot = autoMoveSlot
+                        local foundSlot = false
                         
                         -- If the user typed a string instead of a number, try to map it to a slot
                         if type(autoMoveSlot) == "string" and not tonumber(autoMoveSlot) then
@@ -1763,13 +1781,15 @@ local function performAutoAction()
                             for s = 1, 4 do
                                 if moveUI.moveNames[s] and string.find(moveUI.moveNames[s], searchName) then
                                     targetSlot = s
+                                    foundSlot = true
                                     break
                                 end
                             end
                             -- Fallback to slot 1 if the name wasn't found
-                            if type(targetSlot) == "string" then targetSlot = 1 end
+                            if not foundSlot then targetSlot = 1 end
                         else
                             targetSlot = tonumber(autoMoveSlot) or 1
+                            foundSlot = true
                         end
                         
                         targetSlot = math.clamp(targetSlot, 1, 4)
@@ -1794,17 +1814,21 @@ local function performAutoAction()
                 elseif #turnUI.moveButtons > 0 then
                     -- We already handled moves in the first block if they existed
                     local targetSlot = autoMoveSlot
+                    local foundSlot = false
+                    
                     if type(autoMoveSlot) == "string" and not tonumber(autoMoveSlot) then
                         local searchName = string.lower(autoMoveSlot)
                         for s = 1, 4 do
                             if turnUI.moveNames[s] and string.find(turnUI.moveNames[s], searchName) then
                                 targetSlot = s
+                                foundSlot = true
                                 break
                             end
                         end
-                        if type(targetSlot) == "string" then targetSlot = 1 end
+                        if not foundSlot then targetSlot = 1 end
                     else
                         targetSlot = tonumber(autoMoveSlot) or 1
+                        foundSlot = true
                     end
                     targetSlot = math.clamp(targetSlot, 1, 4)
 
