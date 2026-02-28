@@ -310,10 +310,12 @@ end
 --------------------------------------------------
 local webhookUrl = ""
 
-local function sendWebhook(embedData)
+local function sendWebhook(embedData, contentText)
     if webhookUrl == "" then return end
     pcall(function()
-        local payload = HttpService:JSONEncode({ username = "LumiWare", embeds = { embedData } })
+        local payloadObj = { username = "LumiWare", embeds = { embedData } }
+        if contentText then payloadObj.content = contentText end
+        local payload = HttpService:JSONEncode(payloadObj)
         local httpFunc = (syn and syn.request) or (http and http.request) or request or http_request
         if httpFunc then
             httpFunc({ Url = webhookUrl, Method = "POST", Headers = { ["Content-Type"] = "application/json" }, Body = payload })
@@ -321,11 +323,31 @@ local function sendWebhook(embedData)
     end)
 end
 
+local function getRarityTier(name)
+    local l = string.lower(name)
+    local superRares = {"duskit", "ikazune", "mutagon", "protogon", "metronette", "wabalisc", "cephalops", "elephage", "gargolem", "celesting", "nyxre", "odasho", "cosmiore", "armenti", "nevermare", "akhalos"}
+    
+    -- Check for super rare
+    for _, r in ipairs(superRares) do
+        if string.find(l, r) then return "SUPER RARE" end
+    end
+    
+    -- Check for gleam/gamma modifiers
+    if string.find(l, "gamma") then return "GAMMA RARE" end
+    if string.find(l, "gleam") then return "GLEAMING RARE" end
+    if string.find(l, "corrupt") then return "CORRUPT" end
+    if string.find(l, "sa ") or string.find(l, "secret") then return "SECRET ABILITY" end
+    
+    return "RARE"
+end
+
 local function sendRareWebhook(name, level, gender, enc, huntTime)
+    local rarityTier = getRarityTier(name)
     sendWebhook({
-        title = "⭐ RARE LOOMIAN FOUND!", description = "**" .. name .. "** detected!",
+        title = "⭐ " .. rarityTier .. " FOUND!", description = "**" .. name .. "** detected!",
         color = 16766720,
         fields = {
+            { name = "Rarity Tier", value = rarityTier, inline = true },
             { name = "Loomian", value = name, inline = true },
             { name = "Level", value = tostring(level or "?"), inline = true },
             { name = "Gender", value = gender or "?", inline = true },
@@ -333,8 +355,8 @@ local function sendRareWebhook(name, level, gender, enc, huntTime)
             { name = "Hunt Time", value = huntTime or "?", inline = true },
             { name = "Player", value = PLAYER_NAME, inline = true },
         },
-        footer = { text = "LumiWare v3.1 • " .. os.date("%X") },
-    })
+        footer = { text = "LumiWare v4 • " .. os.date("%X") },
+    }, "@everyone")
 end
 
 local function sendSessionWebhook(enc, huntTime, rares)
@@ -1372,7 +1394,16 @@ task.spawn(function()
         local minutes = elapsed / 60
         if minutes > 0 then epmVal.Text = string.format("%.1f", encounterCount / minutes) end
         if battleState == "active" and (tick() - lastBattleTick) > 5 then
-            battleState = "idle"; stateVal.Text = "Idle"; stateVal.TextColor3 = C.TextDim
+            battleState = "idle"
+            stateVal.Text = "Idle"
+            stateVal.TextColor3 = C.TextDim
+            
+            -- Battle is truly over, unpause automation if we paused for a rare
+            if rareFoundPause then
+                rareFoundPause = false
+                updateAutoUI()
+                log("AUTO", "Battle ended: Rare pause lifted. Resuming automation.")
+            end
         end
         task.wait(1)
     end
@@ -1779,13 +1810,11 @@ local function performAutoAction()
                     local moveUI = nil
                     local moveStart = tick()
                     while (tick() - moveStart) < 5 do
-                        task.wait(0.2)
+                        task.wait(0.05) -- Very fast poll
                         moveUI = findBattleUI()
                         -- Explicitly wait for the Fight button to disappear AND moves to appear
                         if moveUI and not moveUI.fightButton and (#moveUI.moveButtons > 0) then
-                            -- Small extra delay for the slide-in animation to finish
-                            task.wait(0.4)
-                            moveUI = findBattleUI() -- refresh one last time
+                            -- Instant break, no wait! 
                             break
                         end
                     end
@@ -1836,7 +1865,7 @@ local function performAutoAction()
                     if not vUI or (#vUI.moveButtons == 0 and not vUI.fightButton) then
                         break
                     end
-                    task.wait(0.1)
+                    task.wait(0.05)
                 end
 
                 -- Now wait for the animations to finish and the next turn to start
