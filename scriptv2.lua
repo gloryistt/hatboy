@@ -1595,9 +1595,16 @@ local function getBattleGui()
     return bg
 end
 
+-- v4.1: Cached button refs so GetDescendants only runs once per battle
+local cachedBtns = {run = nil, fight = nil, moves = {}, moveN = {}}
+local btnsScanned = false
+
 local function findBattleUI()
     local battleGui = getBattleGui()
-    if not battleGui then return nil end
+    if not battleGui then
+        btnsScanned = false
+        return nil
+    end
 
     local result = {
         runButton = nil,
@@ -1606,111 +1613,131 @@ local function findBattleUI()
         moveNames = {},
     }
 
-    -- Nuclear option: scan ALL descendants for ImageButtons named "Button"
-    -- This works regardless of how deeply nested the buttons are or what their containers are named
+    -- If we already scanned, just re-check visibility on cached refs (INSTANT)
+    if btnsScanned then
+        local valid = true
+        pcall(function()
+            -- Quick sanity: make sure at least one cached ref is still parented
+            if cachedBtns.run and not cachedBtns.run.Parent then valid = false end
+            if cachedBtns.fight and not cachedBtns.fight.Parent then valid = false end
+        end)
+        if valid then
+            pcall(function()
+                if cachedBtns.run and cachedBtns.run.Parent and cachedBtns.run.Parent.Visible then
+                    result.runButton = cachedBtns.run
+                end
+                if cachedBtns.fight and cachedBtns.fight.Parent then
+                    local anc = cachedBtns.fight.Parent
+                    local v = true
+                    while anc and anc ~= battleGui do
+                        if anc:IsA("GuiObject") and not anc.Visible then v = false; break end
+                        anc = anc.Parent
+                    end
+                    if v then result.fightButton = cachedBtns.fight end
+                end
+                for i = 1, 4 do
+                    local mb = cachedBtns.moves[i]
+                    if mb and mb.Parent and mb.Parent.Visible then
+                        result.moveButtons[i] = mb
+                        result.moveNames[i] = cachedBtns.moveN[i]
+                    end
+                end
+            end)
+            return result
+        end
+        btnsScanned = false
+    end
+
+    -- Full scan (runs only once per battle until cache invalidated)
     pcall(function()
         local moveSlots = {Move1=1, Move2=2, Move3=3, Move4=4}
-        local knownNames = {Run=true, Move1=true, Move2=true, Move3=true, Move4=true, SoulMove=true}
-        
         for _, desc in ipairs(battleGui:GetDescendants()) do
-            if desc:IsA("ImageButton") and desc.Name == "Button" then
-                local parent = desc.Parent
-                if parent then
-                    local parentName = parent.Name
-                    
-                    if parentName == "Run" then
-                        if parent.Visible then
-                            result.runButton = desc
-                        end
-                    elseif moveSlots[parentName] then
-                        if parent.Visible then
-                            local slot = moveSlots[parentName]
-                            result.moveButtons[slot] = desc
-                            if not cachedMoveNames[slot] then
-                                local txt = parent:FindFirstChildOfClass("TextLabel")
-                                if not txt then txt = desc:FindFirstChildOfClass("TextLabel") end
-                                if txt and txt.Text and txt.Text ~= "" then
-                                    cachedMoveNames[slot] = txt.Text:lower()
-                                end
+            if desc:IsA("ImageButton") and desc.Name == "Button" and desc.Parent then
+                local pn = desc.Parent.Name
+                if pn == "Run" then
+                    cachedBtns.run = desc
+                    if desc.Parent.Visible then result.runButton = desc end
+                elseif moveSlots[pn] then
+                    local slot = moveSlots[pn]
+                    cachedBtns.moves[slot] = desc
+                    if desc.Parent.Visible then
+                        result.moveButtons[slot] = desc
+                        if not cachedMoveNames[slot] then
+                            local txt = desc.Parent:FindFirstChildOfClass("TextLabel")
+                            if not txt then txt = desc:FindFirstChildOfClass("TextLabel") end
+                            if txt and txt.Text and txt.Text ~= "" then
+                                cachedMoveNames[slot] = txt.Text:lower()
                             end
-                            result.moveNames[slot] = cachedMoveNames[slot]
                         end
-                    elseif parentName ~= "SoulMove" then
-                        -- Any other ImageButton named "Button" = likely Fight
-                        local ancestor = parent
-                        local allVisible = true
-                        while ancestor and ancestor ~= battleGui do
-                            if ancestor:IsA("GuiObject") and not ancestor.Visible then
-                                allVisible = false
-                                break
-                            end
-                            ancestor = ancestor.Parent
-                        end
-                        if allVisible and not result.fightButton then
-                            result.fightButton = desc
-                        end
+                        cachedBtns.moveN[slot] = cachedMoveNames[slot]
+                        result.moveNames[slot] = cachedMoveNames[slot]
                     end
+                elseif pn ~= "SoulMove" then
+                    if not cachedBtns.fight then cachedBtns.fight = desc end
+                    local anc = desc.Parent
+                    local av = true
+                    while anc and anc ~= battleGui do
+                        if anc:IsA("GuiObject") and not anc.Visible then av = false; break end
+                        anc = anc.Parent
+                    end
+                    if av and not result.fightButton then result.fightButton = desc end
                 end
             end
         end
+        btnsScanned = true
     end)
 
     return result
 end
 
+-- v4.1: Fire ALL click methods for Xeno executor compatibility
 local function clickButton(button)
     if not button then return false end
-    local clicked = false
     
-    -- Method 1: fireclick (common executor function)
+    -- METHOD 1 (PRIMARY for Xeno): firesignal with signal object
     pcall(function()
-        if fireclick then
-            fireclick(button)
-            clicked = true
+        if firesignal then firesignal(button.MouseButton1Click) end
+    end)
+    
+    -- METHOD 2: firesignal with instance + signal name (alternative signature)
+    pcall(function()
+        if firesignal then firesignal(button, "MouseButton1Click") end
+    end)
+    
+    -- METHOD 3: fireclick
+    pcall(function()
+        if fireclick then fireclick(button) end
+    end)
+    
+    -- METHOD 4: getconnections
+    pcall(function()
+        if getconnections then
+            for _, conn in ipairs(getconnections(button.MouseButton1Click)) do
+                pcall(function() conn:Fire() end)
+            end
         end
     end)
-    if clicked then return true end
     
-    -- Method 2: firesignal on MouseButton1Click
+    -- METHOD 5: VirtualInputManager without inset
     pcall(function()
-        if firesignal then
-            firesignal(button.MouseButton1Click)
-            clicked = true
-        end
-    end)
-    if clicked then return true end
-    
-    -- Method 3: VirtualInputManager (try both coordinate systems)
-    -- Some executors include GuiInset in AbsolutePosition, some don't
-    pcall(function()
-        local pos = button.AbsolutePosition
-        local sz = button.AbsoluteSize
-        local cx = pos.X + (sz.X / 2)
-        local cy = pos.Y + (sz.Y / 2)
-        
-        -- Try without inset first (most common)
+        local p, s = button.AbsolutePosition, button.AbsoluteSize
+        local cx, cy = p.X + s.X/2, p.Y + s.Y/2
         VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, true, game, 1)
-        task.wait(0.05)
+        task.wait(0.03)
         VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, false, game, 1)
-        clicked = true
     end)
-    if clicked then return true end
     
-    -- Method 4: VirtualInputManager with GuiInset offset
+    -- METHOD 6: VirtualInputManager with inset
     pcall(function()
         local inset = game:GetService("GuiService"):GetGuiInset()
-        local pos = button.AbsolutePosition
-        local sz = button.AbsoluteSize
-        local cx = pos.X + (sz.X / 2)
-        local cy = pos.Y + (sz.Y / 2) + inset.Y
+        local p, s = button.AbsolutePosition, button.AbsoluteSize
+        local cx, cy = p.X + s.X/2, p.Y + s.Y/2 + inset.Y
         VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, true, game, 1)
-        task.wait(0.05)
+        task.wait(0.03)
         VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, false, game, 1)
-        clicked = true
     end)
-    if clicked then return true end
     
-    return false
+    return true
 end
 
 local function performAutoAction()
