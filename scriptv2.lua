@@ -1542,36 +1542,56 @@ local function isVisible(obj)
 end
 
 local cachedMoveNames = {}
-local cachedBattleGui = nil -- Persistent reference to avoid re-traversing GUI tree
+local cachedBattleGui = nil
+local battleGuiDumped = false -- one-shot diagnostic
 
 local function getBattleGui()
-    -- Check if our cached reference is still valid
-    if cachedBattleGui and cachedBattleGui.Parent then
-        return cachedBattleGui
+    if cachedBattleGui then
+        -- Verify cached ref is still valid 
+        local ok, hasParent = pcall(function() return cachedBattleGui.Parent ~= nil end)
+        if ok and hasParent then
+            return cachedBattleGui
+        end
+        cachedBattleGui = nil
     end
-    cachedBattleGui = nil
     
     local pgui = player:FindFirstChild("PlayerGui")
     if not pgui then return nil end
     
-    -- METHOD 1: Direct path (fastest)
-    local mainGui = pgui:FindFirstChild("MainGui")
-    if mainGui then
-        local frame = mainGui:FindFirstChild("Frame")
-        if frame then
-            local bg = frame:FindFirstChild("BattleGui")
-            if bg then
-                cachedBattleGui = bg
-                return bg
+    -- Direct path
+    local bg = nil
+    pcall(function()
+        local m = pgui:FindFirstChild("MainGui")
+        if m then
+            local f = m:FindFirstChild("Frame")
+            if f then
+                bg = f:FindFirstChild("BattleGui")
             end
+        end
+    end)
+    
+    -- Recursive fallback
+    if not bg then
+        pcall(function()
+            bg = pgui:FindFirstChild("BattleGui", true)
+        end)
+    end
+    
+    if bg then
+        cachedBattleGui = bg
+        -- One-shot diagnostic: dump children so we know what names exist
+        if not battleGuiDumped then
+            battleGuiDumped = true
+            pcall(function()
+                log("AUTO", "=== BattleGui children ===")
+                for _, ch in ipairs(bg:GetChildren()) do
+                    log("AUTO", "  " .. ch.Name .. " (" .. ch.ClassName .. ") Visible=" .. tostring(ch.Visible))
+                end
+                log("AUTO", "=== end ===")
+            end)
         end
     end
     
-    -- METHOD 2: Recursive search fallback (finds BattleGui anywhere in PlayerGui)
-    local bg = pgui:FindFirstChild("BattleGui", true)
-    if bg then
-        cachedBattleGui = bg
-    end
     return bg
 end
 
@@ -1586,68 +1606,41 @@ local function findBattleUI()
         moveNames = {},
     }
 
-    -- Run button: direct property access (no isVisible wrapper overhead)
-    local runC = battleGui:FindFirstChild("Run")
-    if runC then
-        local vis = true
-        pcall(function() vis = runC.Visible end)
-        if vis then
+    -- Wrap entire scan in pcall so ANY error is caught and we just return partial results
+    pcall(function()
+        -- Run button
+        local runC = battleGui:FindFirstChild("Run")
+        if runC then
             local btn = runC:FindFirstChild("Button")
-            if btn then
-                local bvis = true
-                pcall(function() bvis = btn.Visible end)
-                if bvis then result.runButton = btn end
-            end
+            if btn then result.runButton = btn end
         end
-    end
-
-    -- Fight button: The game names this "BattleUi", NOT "Fight"!
-    -- Check both names for robustness
-    local fightC = battleGui:FindFirstChild("BattleUi") or battleGui:FindFirstChild("Fight")
-    if fightC then
-        local vis = true
-        pcall(function() vis = fightC.Visible end)
-        if vis then
+    
+        -- Fight button (game calls it "BattleUi")
+        local fightC = battleGui:FindFirstChild("BattleUi") or battleGui:FindFirstChild("Fight")
+        if fightC then
             local btn = fightC:FindFirstChild("Button")
-            if btn then
-                local bvis = true
-                pcall(function() bvis = btn.Visible end)
-                if bvis then result.fightButton = btn end
-            end
+            if btn then result.fightButton = btn end
         end
-    end
-
-    -- Move buttons: unrolled loop for speed (no string concat "Move"..i per call)
-    local moveNames = {"Move1", "Move2", "Move3", "Move4"}
-    for i = 1, 4 do
-        local mc = battleGui:FindFirstChild(moveNames[i])
-        if mc then
-            local vis = true
-            pcall(function() vis = mc.Visible end)
-            if vis then
+    
+        -- Move buttons
+        for i = 1, 4 do
+            local mc = battleGui:FindFirstChild("Move" .. i)
+            if mc then
                 local btn = mc:FindFirstChild("Button")
                 if btn then
-                    local bvis = true
-                    pcall(function() bvis = btn.Visible end)
-                    if bvis then
-                        result.moveButtons[i] = btn
-                        if not cachedMoveNames[i] then
-                            local txt = mc:FindFirstChildOfClass("TextLabel")
-                            if not txt then txt = btn:FindFirstChildOfClass("TextLabel") end
-                            if txt then
-                                pcall(function()
-                                    if txt.Text and txt.Text ~= "" then
-                                        cachedMoveNames[i] = txt.Text:lower()
-                                    end
-                                end)
-                            end
+                    result.moveButtons[i] = btn
+                    if not cachedMoveNames[i] then
+                        local txt = mc:FindFirstChildOfClass("TextLabel")
+                        if not txt then txt = btn:FindFirstChildOfClass("TextLabel") end
+                        if txt and txt.Text and txt.Text ~= "" then
+                            cachedMoveNames[i] = txt.Text:lower()
                         end
-                        result.moveNames[i] = cachedMoveNames[i]
                     end
+                    result.moveNames[i] = cachedMoveNames[i]
                 end
             end
         end
-    end
+    end)
 
     return result
 end
