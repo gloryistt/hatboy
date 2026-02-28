@@ -1554,13 +1554,21 @@ local function getBattleGui()
     local pgui = player:FindFirstChild("PlayerGui")
     if not pgui then return nil end
     
+    -- METHOD 1: Direct path (fastest)
     local mainGui = pgui:FindFirstChild("MainGui")
-    if not mainGui then return nil end
+    if mainGui then
+        local frame = mainGui:FindFirstChild("Frame")
+        if frame then
+            local bg = frame:FindFirstChild("BattleGui")
+            if bg then
+                cachedBattleGui = bg
+                return bg
+            end
+        end
+    end
     
-    local frame = mainGui:FindFirstChild("Frame")
-    if not frame then return nil end
-    
-    local bg = frame:FindFirstChild("BattleGui")
+    -- METHOD 2: Recursive search fallback (finds BattleGui anywhere in PlayerGui)
+    local bg = pgui:FindFirstChild("BattleGui", true)
     if bg then
         cachedBattleGui = bg
     end
