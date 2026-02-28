@@ -1606,53 +1606,50 @@ local function findBattleUI()
         moveNames = {},
     }
 
-    -- Wrap entire scan in pcall so ANY error is caught and we just return partial results
+    -- Nuclear option: scan ALL descendants for ImageButtons named "Button"
+    -- This works regardless of how deeply nested the buttons are or what their containers are named
     pcall(function()
-        -- Known names to SKIP when searching for fight button
-        local skipNames = {Run=true, Move1=true, Move2=true, Move3=true, Move4=true, SoulMove=true, Frame=true}
+        local moveSlots = {Move1=1, Move2=2, Move3=3, Move4=4}
+        local knownNames = {Run=true, Move1=true, Move2=true, Move3=true, Move4=true, SoulMove=true}
         
-        -- Run button (named "Run")
-        local runC = battleGui:FindFirstChild("Run")
-        if runC and runC.Visible then
-            local btn = runC:FindFirstChild("Button")
-            if btn then result.runButton = btn end
-        end
-    
-        -- Fight button: try named first, then scan for unnamed visible ImageLabel with Button child
-        local fightC = battleGui:FindFirstChild("BattleUi") or battleGui:FindFirstChild("Fight")
-        if fightC and fightC.Visible then
-            local btn = fightC:FindFirstChild("Button")
-            if btn then result.fightButton = btn end
-        end
-        
-        -- Fallback: fight button might be an unnamed ImageLabel
-        if not result.fightButton then
-            for _, child in ipairs(battleGui:GetChildren()) do
-                if child.Visible and child:IsA("ImageLabel") and not skipNames[child.Name] then
-                    local btn = child:FindFirstChild("Button")
-                    if btn then
-                        result.fightButton = btn
-                        break
-                    end
-                end
-            end
-        end
-    
-        -- Move buttons (Visible check needed: they're Visible=false when hidden)
-        for i = 1, 4 do
-            local mc = battleGui:FindFirstChild("Move" .. i)
-            if mc and mc.Visible then
-                local btn = mc:FindFirstChild("Button")
-                if btn then
-                    result.moveButtons[i] = btn
-                    if not cachedMoveNames[i] then
-                        local txt = mc:FindFirstChildOfClass("TextLabel")
-                        if not txt then txt = btn:FindFirstChildOfClass("TextLabel") end
-                        if txt and txt.Text and txt.Text ~= "" then
-                            cachedMoveNames[i] = txt.Text:lower()
+        for _, desc in ipairs(battleGui:GetDescendants()) do
+            if desc:IsA("ImageButton") and desc.Name == "Button" then
+                local parent = desc.Parent
+                if parent then
+                    local parentName = parent.Name
+                    
+                    if parentName == "Run" then
+                        if parent.Visible then
+                            result.runButton = desc
+                        end
+                    elseif moveSlots[parentName] then
+                        if parent.Visible then
+                            local slot = moveSlots[parentName]
+                            result.moveButtons[slot] = desc
+                            if not cachedMoveNames[slot] then
+                                local txt = parent:FindFirstChildOfClass("TextLabel")
+                                if not txt then txt = desc:FindFirstChildOfClass("TextLabel") end
+                                if txt and txt.Text and txt.Text ~= "" then
+                                    cachedMoveNames[slot] = txt.Text:lower()
+                                end
+                            end
+                            result.moveNames[slot] = cachedMoveNames[slot]
+                        end
+                    elseif parentName ~= "SoulMove" then
+                        -- Any other ImageButton named "Button" = likely Fight
+                        local ancestor = parent
+                        local allVisible = true
+                        while ancestor and ancestor ~= battleGui do
+                            if ancestor:IsA("GuiObject") and not ancestor.Visible then
+                                allVisible = false
+                                break
+                            end
+                            ancestor = ancestor.Parent
+                        end
+                        if allVisible and not result.fightButton then
+                            result.fightButton = desc
                         end
                     end
-                    result.moveNames[i] = cachedMoveNames[i]
                 end
             end
         end
