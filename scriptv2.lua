@@ -1695,77 +1695,39 @@ local function findBattleUI()
     return result
 end
 
--- v4.2: Ultra-fast clicking — getconnections > firesignal > fireclick > VIM
+-- v4.3: Fire ALL click methods every time — VIM is primary, signal methods are supplementary
 local function clickButton(button)
     if not button then return false end
     
-    -- METHOD 1 (BEST): getconnections — directly fire every connected callback
-    local gcFired = false
-    if getconnections then
-        pcall(function()
-            for _, conn in ipairs(getconnections(button.MouseButton1Click)) do
-                pcall(function() conn:Fire() end)
-                gcFired = true
-            end
-        end)
-        pcall(function()
-            for _, conn in ipairs(getconnections(button.Activated)) do
-                pcall(function() conn:Fire() end)
-                gcFired = true
-            end
-        end)
-        -- Also fire parent's signals (some UIs wrap the button)
-        if button.Parent then
-            pcall(function()
-                for _, conn in ipairs(getconnections(button.Parent.MouseButton1Click)) do
-                    pcall(function() conn:Fire() end)
-                    gcFired = true
-                end
-            end)
-            pcall(function()
-                for _, conn in ipairs(getconnections(button.Parent.Activated)) do
-                    pcall(function() conn:Fire() end)
-                    gcFired = true
-                end
-            end)
-        end
-    end
-    if gcFired then return true end
-    
-    -- METHOD 2: firesignal
-    local sigFired = false
+    -- Supplementary: firesignal (may or may not work, fire it anyway)
     if firesignal then
-        pcall(function() firesignal(button.MouseButton1Click); sigFired = true end)
-        pcall(function() firesignal(button.Activated); sigFired = true end)
+        pcall(function() firesignal(button.MouseButton1Click) end)
+        pcall(function() firesignal(button.Activated) end)
         if button.Parent then
-            pcall(function() firesignal(button.Parent.MouseButton1Click); sigFired = true end)
+            pcall(function() firesignal(button.Parent.MouseButton1Click) end)
         end
     end
-    if sigFired then return true end
     
-    -- METHOD 3: fireclick
+    -- Supplementary: fireclick
     if fireclick then
         pcall(function() fireclick(button) end)
-        return true
     end
     
-    -- METHOD 4 (SLOWEST): VirtualInputManager — only if nothing else exists
-    task.spawn(function()
-        pcall(function()
-            local p, s = button.AbsolutePosition, button.AbsoluteSize
-            local cx, cy = p.X + s.X/2, p.Y + s.Y/2
-            VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, true, game, 1)
-            task.wait(0.03)
-            VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, false, game, 1)
-        end)
-        pcall(function()
-            local inset = game:GetService("GuiService"):GetGuiInset()
-            local p, s = button.AbsolutePosition, button.AbsoluteSize
-            local cx, cy = p.X + s.X/2, p.Y + s.Y/2 + inset.Y
-            VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, true, game, 1)
-            task.wait(0.03)
-            VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, false, game, 1)
-        end)
+    -- PRIMARY: VirtualInputManager — always fires, this is what actually works on Xeno
+    pcall(function()
+        local p, s = button.AbsolutePosition, button.AbsoluteSize
+        local cx, cy = p.X + s.X/2, p.Y + s.Y/2
+        VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, true, game, 1)
+        task.wait(0.03)
+        VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, false, game, 1)
+    end)
+    pcall(function()
+        local inset = game:GetService("GuiService"):GetGuiInset()
+        local p, s = button.AbsolutePosition, button.AbsoluteSize
+        local cx, cy = p.X + s.X/2, p.Y + s.Y/2 + inset.Y
+        VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, true, game, 1)
+        task.wait(0.03)
+        VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, false, game, 1)
     end)
     
     return true
@@ -1858,12 +1820,15 @@ local function performAutoAction()
                 end
 
                 -- STEP 1: Click Fight if present, OR if we magically already have moves open, click them
+                local clickedSomething = false
+                
                 if turnUI.fightButton and not hasAnyMove(turnUI) then
                     log("AUTO", "Auto-MOVE turn " .. turnCount .. ": clicking Fight")
                     if turnCount == 1 then
                         addBattleLog("🤖 Auto-MOVE ▸ fighting...", C.Green)
                     end
                     clickButton(turnUI.fightButton)
+                    clickedSomething = true
 
                     -- STEP 2: Wait for move buttons — RETRY Fight click every 0.3s if they don't appear
                     local moveUI = nil
@@ -1889,7 +1854,6 @@ local function performAutoAction()
                         local targetSlot = autoMoveSlot
                         local foundSlot = false
                         
-                        -- If the user typed a string instead of a number, try to map it to a slot
                         if type(autoMoveSlot) == "string" and not tonumber(autoMoveSlot) then
                             local searchName = string.lower(autoMoveSlot)
                             for s = 1, 4 do
@@ -1899,7 +1863,6 @@ local function performAutoAction()
                                     break
                                 end
                             end
-                            -- Fallback to slot 1 if the name wasn't found
                             if not foundSlot then targetSlot = 1 end
                         else
                             targetSlot = tonumber(autoMoveSlot) or 1
@@ -1923,10 +1886,9 @@ local function performAutoAction()
                         end
                     else
                         addBattleLog("⚠ No move buttons turn " .. turnCount, C.Orange)
-                        -- Don't break, just let the wait loop run
                     end
                 elseif hasAnyMove(turnUI) then
-                    -- We already handled moves in the first block if they existed
+                    clickedSomething = true
                     local targetSlot = autoMoveSlot
                     local foundSlot = false
                     
@@ -1960,61 +1922,62 @@ local function performAutoAction()
                     end
                 end
 
-                -- Wait for the UI to disappear (move was selected) — retry move click if it's still showing
-                local vanishStart = tick()
-                local lastMoveRetry = vanishStart
-                while (tick() - vanishStart) < 2 do
-                    local vUI = findBattleUI()
-                    if not vUI or not hasAnyMove(vUI) then
-                        break
-                    end
-                    -- Retry the move click every 0.3s if the move panel is still showing
-                    if (tick() - lastMoveRetry) >= 0.3 and vUI then
-                        lastMoveRetry = tick()
-                        local retrySlot = tonumber(autoMoveSlot) or 1
-                        retrySlot = math.clamp(retrySlot, 1, 4)
-                        if vUI.moveButtons[retrySlot] then
-                            clickButton(vUI.moveButtons[retrySlot])
-                        else
-                            for s = 1, 4 do
-                                if vUI.moveButtons[s] then
-                                    clickButton(vUI.moveButtons[s])
-                                    break
+                -- ONLY run wait loops if we actually clicked something
+                -- If nothing was clicked (button not visible yet), skip straight to next turn poll
+                if clickedSomething then
+                    -- Wait for the UI to disappear (move was selected) — retry move click if still showing
+                    local vanishStart = tick()
+                    local lastMoveRetry = vanishStart
+                    while (tick() - vanishStart) < 2 do
+                        local vUI = findBattleUI()
+                        if not vUI or not hasAnyMove(vUI) then
+                            break
+                        end
+                        -- Retry the move click every 0.3s if the move panel is still showing
+                        if (tick() - lastMoveRetry) >= 0.3 and vUI then
+                            lastMoveRetry = tick()
+                            local retrySlot = tonumber(autoMoveSlot) or 1
+                            retrySlot = math.clamp(retrySlot, 1, 4)
+                            if vUI.moveButtons[retrySlot] then
+                                clickButton(vUI.moveButtons[retrySlot])
+                            else
+                                for s = 1, 4 do
+                                    if vUI.moveButtons[s] then
+                                        clickButton(vUI.moveButtons[s])
+                                        break
+                                    end
                                 end
                             end
                         end
+                        heartbeat:Wait()
                     end
-                    heartbeat:Wait()
-                end
 
-                -- Now wait for the animations to finish and the next turn to start
-                local waitStart = tick()
-                local battleEnded = false
-                while (tick() - waitStart) < 30 do
-                    if rareFoundPause or autoMode ~= "move" then break end
-                    local checkUI = findBattleUI()
-                    if checkUI and (checkUI.fightButton or checkUI.runButton) then
-                        break
-                    elseif not checkUI and (tick() - waitStart) > 5 then
-                        if player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
-                            -- 5+ seconds with no UI and character present = battle likely over
+                    -- Wait for animations to finish and the next turn to start
+                    local waitStart = tick()
+                    while (tick() - waitStart) < 30 do
+                        if rareFoundPause or autoMode ~= "move" then break end
+                        local checkUI = findBattleUI()
+                        if checkUI and (checkUI.fightButton or hasAnyMove(checkUI)) then
+                            break
+                        elseif not checkUI and (tick() - waitStart) > 5 then
+                            if player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+                                log("AUTO", "Battle ended (no UI for 5s)")
+                                addBattleLog("🤖 Battle done (" .. turnCount .. " turns)", C.Green)
+                                break
+                            end
                         end
+                        heartbeat:Wait()
                     end
-                    heartbeat:Wait()
-                end
 
-                -- Check if battle ended
-                local finalCheck = findBattleUI()
-                if not finalCheck and (tick() - waitStart) >= 30 then
-                    -- If we strictly timed out after 30 seconds with NO UI, it's safe to assume battle is over 
-                    -- (or the game broke, in which case we should abort anyway)
-                    log("AUTO", "Battle ended after " .. turnCount .. " turns (timeout)")
-                    addBattleLog("🤖 Battle done (" .. turnCount .. " turns)", C.Green)
-                    break
-                elseif finalCheck and not finalCheck.fightButton and not finalCheck.runButton and not hasAnyMove(finalCheck) then
-                    -- We see the UI, but it has no buttons. It might just be an animation still, so we DON'T break
-                    -- It will loop back up to turnCount + 1 and hit the 10-second turn check wait.
-                    log("AUTO", "Turn " .. turnCount .. " ended, looping to next")
+                    -- Check if battle ended
+                    local finalCheck = findBattleUI()
+                    if not finalCheck then
+                        log("AUTO", "Battle ended after " .. turnCount .. " turns")
+                        addBattleLog("🤖 Battle done (" .. turnCount .. " turns)", C.Green)
+                        break
+                    elseif finalCheck and not finalCheck.fightButton and not finalCheck.runButton and not hasAnyMove(finalCheck) then
+                        log("AUTO", "Turn " .. turnCount .. " ended, looping to next")
+                    end
                 end
             end
         end
