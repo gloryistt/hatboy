@@ -1058,11 +1058,11 @@ local function startAutoWalk()
                         conn = humanoid.MoveToFinished:Connect(function()
                             reached = true
                         end)
-                        while not reached and (tick() - moveStart) < 4 and autoWalkEnabled do
+                        while not reached and (tick() - moveStart) < 2 and autoWalkEnabled do
                             task.wait(0.1)
                         end
                         if conn then conn:Disconnect() end
-                        task.wait(0.2)
+                        task.wait(0.05)
                     end
                 end
             end
@@ -1103,6 +1103,13 @@ end)
 
 --------------------------------------------------
 -- AUTO-BATTLE: Find & Click Game UI Buttons
+-- From scan: buttons are at
+--   PlayerGui/MainGui/Frame/BattleGui/Run/Button
+--   PlayerGui/MainGui/Frame/BattleGui/Move1/Button
+--   PlayerGui/MainGui/Frame/BattleGui/Move2/Button
+--   PlayerGui/MainGui/Frame/BattleGui/Move3/Button
+--   PlayerGui/MainGui/Frame/BattleGui/Move4/Button
+-- All are ImageButtons.
 --------------------------------------------------
 local function findBattleUI()
     local pgui = player:FindFirstChild("PlayerGui")
@@ -1110,48 +1117,50 @@ local function findBattleUI()
 
     local result = {
         runButton = nil,
-        fightButton = nil,
         moveButtons = {},
     }
 
-    local function searchUI(parent, depth)
-        if depth > 12 then return end
-        for _, child in ipairs(parent:GetChildren()) do
-            if child:IsA("TextButton") or child:IsA("ImageButton") then
-                local text = ""
-                if child:IsA("TextButton") then text = string.lower(child.Text) end
-                local cname = child.Name:lower()
+    -- Direct path: MainGui/Frame/BattleGui
+    local mainGui = pgui:FindFirstChild("MainGui")
+    if not mainGui then
+        logDebug("findBattleUI: MainGui not found")
+        return nil
+    end
 
-                -- Run button
-                if text == "run" or cname == "run" or string.find(cname, "runbtn") or string.find(cname, "flee") then
-                    if child.Visible ~= false then result.runButton = child end
-                end
+    local frame = mainGui:FindFirstChild("Frame")
+    if not frame then
+        logDebug("findBattleUI: Frame not found")
+        return nil
+    end
 
-                -- Fight button
-                if text == "fight" or cname == "fight" or string.find(cname, "fightbtn") or string.find(cname, "attack") then
-                    if child.Visible ~= false then result.fightButton = child end
-                end
-            end
+    local battleGui = frame:FindFirstChild("BattleGui")
+    if not battleGui then
+        logDebug("findBattleUI: BattleGui not found")
+        return nil
+    end
 
-            -- Move buttons container
-            if child:IsA("Frame") or child:IsA("ScrollingFrame") then
-                local cname = child.Name:lower()
-                if string.find(cname, "move") or string.find(cname, "skill") or string.find(cname, "attack") then
-                    local moveIdx = 0
-                    for _, mBtn in ipairs(child:GetChildren()) do
-                        if mBtn:IsA("TextButton") or mBtn:IsA("ImageButton") then
-                            moveIdx = moveIdx + 1
-                            result.moveButtons[moveIdx] = mBtn
-                        end
-                    end
-                end
-            end
-
-            searchUI(child, depth + 1)
+    -- Run button: BattleGui/Run/Button
+    local runContainer = battleGui:FindFirstChild("Run")
+    if runContainer then
+        local runBtn = runContainer:FindFirstChild("Button")
+        if runBtn then
+            result.runButton = runBtn
+            logDebug("findBattleUI: Run button found")
         end
     end
 
-    searchUI(pgui, 0)
+    -- Move buttons: BattleGui/Move1/Button through Move4/Button
+    for i = 1, 4 do
+        local moveContainer = battleGui:FindFirstChild("Move" .. i)
+        if moveContainer then
+            local moveBtn = moveContainer:FindFirstChild("Button")
+            if moveBtn then
+                result.moveButtons[i] = moveBtn
+                logDebug("findBattleUI: Move" .. i .. " button found")
+            end
+        end
+    end
+
     return result
 end
 
@@ -1191,7 +1200,7 @@ local function performAutoAction()
     pendingAutoAction = true
 
     task.spawn(function()
-        -- Wait for game UI to render
+        -- Wait for game UI to render (battle intro animation)
         task.wait(1.5)
 
         if rareFoundPause or autoMode == "off" then
@@ -1203,8 +1212,13 @@ local function performAutoAction()
         if not ui then
             log("AUTO", "Could not find battle UI")
             addBattleLog("⚠ Auto: Battle UI not found", C.Orange)
-            pendingAutoAction = false
-            return
+            -- Retry once after a bit more time
+            task.wait(1)
+            ui = findBattleUI()
+            if not ui then
+                pendingAutoAction = false
+                return
+            end
         end
 
         if autoMode == "run" then
@@ -1216,32 +1230,25 @@ local function performAutoAction()
                 addBattleLog("⚠ Auto: Run button not found", C.Orange)
             end
         elseif autoMode == "move" then
-            -- Click Fight first to open move menu
-            if ui.fightButton then
-                log("AUTO", "Auto-MOVE: clicking fight button")
-                clickButton(ui.fightButton)
-                task.wait(0.8)
-
-                -- Re-scan for move buttons
-                local ui2 = findBattleUI()
-                if ui2 and ui2.moveButtons[autoMoveSlot] then
-                    log("AUTO", "Auto-MOVE: clicking move slot " .. autoMoveSlot)
-                    addBattleLog("🤖 Auto-MOVE ▸ slot " .. autoMoveSlot, C.Green)
-                    clickButton(ui2.moveButtons[autoMoveSlot])
-                elseif ui2 then
-                    -- Fallback: click any available move
-                    for s = 1, 4 do
-                        if ui2.moveButtons[s] then
-                            addBattleLog("🤖 Auto-MOVE ▸ slot " .. s .. " (fallback)", C.Green)
-                            clickButton(ui2.moveButtons[s])
-                            break
-                        end
-                    end
-                else
-                    addBattleLog("⚠ Auto: Move buttons not found", C.Orange)
-                end
+            -- Moves are directly accessible — no Fight button needed
+            if ui.moveButtons[autoMoveSlot] then
+                log("AUTO", "Auto-MOVE: clicking Move" .. autoMoveSlot)
+                addBattleLog("🤖 Auto-MOVE ▸ Move " .. autoMoveSlot, C.Green)
+                clickButton(ui.moveButtons[autoMoveSlot])
             else
-                addBattleLog("⚠ Auto: Fight button not found", C.Orange)
+                -- Fallback: try any available move
+                local clicked = false
+                for s = 1, 4 do
+                    if ui.moveButtons[s] then
+                        addBattleLog("🤖 Auto-MOVE ▸ Move " .. s .. " (fallback)", C.Green)
+                        clickButton(ui.moveButtons[s])
+                        clicked = true
+                        break
+                    end
+                end
+                if not clicked then
+                    addBattleLog("⚠ Auto: No move buttons found", C.Orange)
+                end
             end
         end
 
