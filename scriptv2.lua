@@ -1648,7 +1648,16 @@ local function findBattleUI()
                     end
                 end
             end)
-            return result
+            
+            -- If we have NO cached move buttons at all, force a re-scan
+            -- (moves may not have existed in the tree during the first scan)
+            if not cachedBtns.moves[1] and not cachedBtns.moves[2] 
+               and not cachedBtns.moves[3] and not cachedBtns.moves[4] then
+                btnsScanned = false
+                -- Fall through to full scan below
+            else
+                return result
+            end
         end
         btnsScanned = false
     end
