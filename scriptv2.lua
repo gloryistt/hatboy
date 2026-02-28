@@ -1725,6 +1725,8 @@ local function performAutoAction()
             else
                 addBattleLog("⚠ Auto: Run button not found", C.Orange)
             end
+            pendingAutoAction = false
+            return
         elseif autoMode == "move" then
             -- BATTLE LOOP: repeat Fight → Move each turn until battle ends
             local turnCount = 0
