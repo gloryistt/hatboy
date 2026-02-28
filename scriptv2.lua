@@ -1599,6 +1599,11 @@ end
 local cachedBtns = {run = nil, fight = nil, moves = {}, moveN = {}}
 local btnsScanned = false
 
+-- Helper: Lua's # on sparse tables is UNDEFINED. {nil, btn, nil, nil} returns #=0!
+local function hasAnyMove(ui)
+    return ui and (ui.moveButtons[1] or ui.moveButtons[2] or ui.moveButtons[3] or ui.moveButtons[4]) and true or false
+end
+
 local function findBattleUI()
     local battleGui = getBattleGui()
     if not battleGui then
@@ -1818,18 +1823,18 @@ local function performAutoAction()
                 while (tick() - turnStart) < 10 do
                     if rareFoundPause or autoMode ~= "move" then break end
                     turnUI = findBattleUI()
-                    if turnUI and (turnUI.fightButton or #turnUI.moveButtons > 0) then break end
+                    if turnUI and (turnUI.fightButton or hasAnyMove(turnUI)) then break end
                     heartbeat:Wait() -- Frame-level polling
                 end
 
-                if not turnUI or (not turnUI.fightButton and #turnUI.moveButtons == 0) then
+                if not turnUI or (not turnUI.fightButton and not hasAnyMove(turnUI)) then
                     log("AUTO", "Auto-MOVE: No UI found, assuming cutscene/animation. Waiting...")
                     -- Don't break here, let the bottom wait loop handle the patience
                     turnUI = { fightButton = nil, moveButtons = {}, moveNames = {} }
                 end
 
                 -- STEP 1: Click Fight if present, OR if we magically already have moves open, click them
-                if turnUI.fightButton and #turnUI.moveButtons == 0 then
+                if turnUI.fightButton and not hasAnyMove(turnUI) then
                     log("AUTO", "Auto-MOVE turn " .. turnCount .. ": clicking Fight")
                     if turnCount == 1 then
                         addBattleLog("🤖 Auto-MOVE ▸ fighting...", C.Green)
@@ -1842,12 +1847,12 @@ local function performAutoAction()
                     while (tick() - moveStart) < 5 do
                         heartbeat:Wait() -- Frame-level polling
                         moveUI = findBattleUI()
-                        if moveUI and (#moveUI.moveButtons > 0) then
+                        if moveUI and hasAnyMove(moveUI) then
                             break
                         end
                     end
 
-                    if moveUI and (#moveUI.moveButtons > 0) then
+                    if moveUI and hasAnyMove(moveUI) then
                         local targetSlot = autoMoveSlot
                         local foundSlot = false
                         
@@ -1887,7 +1892,7 @@ local function performAutoAction()
                         addBattleLog("⚠ No move buttons turn " .. turnCount, C.Orange)
                         -- Don't break, just let the wait loop run
                     end
-                elseif #turnUI.moveButtons > 0 then
+                elseif hasAnyMove(turnUI) then
                     -- We already handled moves in the first block if they existed
                     local targetSlot = autoMoveSlot
                     local foundSlot = false
@@ -1926,7 +1931,7 @@ local function performAutoAction()
                 local vanishStart = tick()
                 while (tick() - vanishStart) < 5 do
                     local vUI = findBattleUI()
-                    if not vUI or #vUI.moveButtons == 0 then
+                    if not vUI or not hasAnyMove(vUI) then
                         break
                     end
                     heartbeat:Wait()
@@ -1956,7 +1961,7 @@ local function performAutoAction()
                     log("AUTO", "Battle ended after " .. turnCount .. " turns (timeout)")
                     addBattleLog("🤖 Battle done (" .. turnCount .. " turns)", C.Green)
                     break
-                elseif finalCheck and not finalCheck.fightButton and not finalCheck.runButton and #finalCheck.moveButtons == 0 then
+                elseif finalCheck and not finalCheck.fightButton and not finalCheck.runButton and not hasAnyMove(finalCheck) then
                     -- We see the UI, but it has no buttons. It might just be an animation still, so we DON'T break
                     -- It will loop back up to turnCount + 1 and hit the 10-second turn check wait.
                     log("AUTO", "Turn " .. turnCount .. " ended, looping to next")
