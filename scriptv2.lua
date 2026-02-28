@@ -40,7 +40,7 @@ local RARE_LOOMIANS = {
     "Cephalops", "Elephage", "Gargolem", "Celesting", "Nyxre", "Pyramind",
     "Terracolt", "Garbantis", "Cynamoth", "Avitross", "Snocub", "Eaglit",
     "Vambat", "Weevolt", "Nevermare",
-    "Akhalos", "Odasho", "Cosmiore", "Armenti"
+    "Akhalos", "Odasho", "Cosmiore", "Armenti", "Shawchi"
 }
 local customRares = {}
 
@@ -48,7 +48,7 @@ local customRares = {}
 -- Catches: "Gleam Dripple", "Gamma Grubby", "SA Dripple", etc.
 local RARE_MODIFIERS = {
     "gleam", "gleaming", "gamma", "corrupt", "corrupted",
-    "alpha", "twilat", "iridescent", "metallic", "rainbow",
+    "alpha", "iridescent", "metallic", "rainbow",
     "sa ", "pn ", "hw ", "ny ",           -- event prefixes
     "secret", "shiny", "radiant",
 }
@@ -65,7 +65,7 @@ end
 -- LAYER 2: Deep scan ANY table/string for gleam/gamma/corrupt keywords
 -- This catches model tables like {disc="gleamdisc", ...} or {variant="gamma"}
 local RARE_KEYWORDS_DEEP = {
-    "gleam", "gamma", "corrupt", "alpha", "twilat",
+    "gleam", "gamma", "corrupt", "alpha",
     "iridescent", "metallic", "rainbow", "shiny", "radiant", "secret",
 }
 
