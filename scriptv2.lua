@@ -1,5 +1,5 @@
 --------------------------------------------------
--- LUMIWARE V3.1 — Battle Detection Fix
+-- LUMIWARE V3.2 — Battle Detection Fix
 -- FORMAT: EVT(arg1="BattleEvent", arg2=sessionID,
 --   arg3=subCmd, arg4=commandTable)
 -- Commands: "owm"/"switch"/"player"/"start"
@@ -1019,89 +1019,69 @@ local function hookEvent(remote)
         end
 
         -- ============================================
-        -- STEP 2: Find the command table
-        -- Search EVERY arg for a table containing
-        -- subtables whose [1] is a known command.
-        -- Uses BOTH pairs() AND direct indexing as
-        -- redundant methods.
+        -- STEP 2: Find and decode the command table
+        -- CRITICAL: Battle commands are JSON-ENCODED
+        -- STRINGS, not Lua tables! e.g.:
+        --   arg4[1] = '["player","p2","#Wild",0]'
+        --   arg4[2] = '["player","p1","glo",0]'
+        -- We must JSONDecode each entry first.
         -- ============================================
         local cmdTable = nil
 
-        local searchFrom = isBattle and 1 or 1
-        for i = searchFrom, argCount do
+        for i = 1, argCount do
             local arg = allArgs[i]
             if type(arg) == "table" then
-                local found = false
-
-                -- Method 1: pairs() iteration
+                -- Check entries: are they JSON strings or Lua tables?
                 for k, v in pairs(arg) do
                     if type(v) == "table" then
+                        -- Already a Lua table (unlikely based on diagnostics, but handle it)
                         local first = v[1]
-                        if type(first) == "string" then
-                            local cmd = string.lower(first)
-                            if KNOWN_COMMANDS[cmd] then
-                                log("BATTLE", ">>> FOUND cmd table via pairs() in arg" .. i .. " key=" .. tostring(k) .. " cmd=" .. first)
-                                cmdTable = arg
-                                found = true
-                                break
-                            end
-                        end
-                    end
-                end
-
-                if found then break end
-
-                -- Method 2: Direct numeric indexing (1 to 20)
-                -- In case pairs() somehow skips entries
-                for j = 1, 20 do
-                    local v = arg[j]
-                    if v == nil then break end
-                    if type(v) == "table" then
-                        local first = v[1]
-                        if type(first) == "string" then
-                            local cmd = string.lower(first)
-                            if KNOWN_COMMANDS[cmd] then
-                                log("BATTLE", ">>> FOUND cmd table via index in arg" .. i .. " [" .. j .. "] cmd=" .. first)
-                                cmdTable = arg
-                                found = true
-                                break
-                            end
-                        end
-                    end
-                end
-
-                if found then break end
-
-                -- Method 3: rawget (bypass metatables)
-                -- Try key 1 directly with rawget
-                local raw1 = rawget(arg, 1)
-                if type(raw1) == "table" then
-                    local rawFirst = rawget(raw1, 1)
-                    if type(rawFirst) == "string" then
-                        local cmd = string.lower(rawFirst)
-                        if KNOWN_COMMANDS[cmd] then
-                            log("BATTLE", ">>> FOUND cmd table via rawget in arg" .. i .. " cmd=" .. rawFirst)
+                        if type(first) == "string" and KNOWN_COMMANDS[string.lower(first)] then
+                            log("BATTLE", ">>> FOUND native cmd table in arg" .. i)
                             cmdTable = arg
                             break
                         end
-                    end
-                end
-
-                -- Diagnostic: if this is a BattleEvent and this arg is a table, log what we see
-                if isBattle and VERBOSE_MODE then
-                    log("DEBUG", "  arg" .. i .. " is table, scanning entries:")
-                    local entryCount = 0
-                    for k, v in pairs(arg) do
-                        entryCount = entryCount + 1
-                        if entryCount <= 5 then
-                            log("DEBUG", "    key=" .. tostring(k) .. " type(v)=" .. type(v))
-                            if type(v) == "table" then
-                                log("DEBUG", "      v[1]=" .. tostring(v[1]) .. " type(v[1])=" .. type(v[1]))
+                    elseif type(v) == "string" and string.sub(v, 1, 1) == "[" then
+                        -- JSON-encoded string! Try to decode it
+                        local ok, decoded = pcall(function()
+                            return HttpService:JSONDecode(v)
+                        end)
+                        if ok and type(decoded) == "table" and type(decoded[1]) == "string" then
+                            local cmd = string.lower(decoded[1])
+                            if KNOWN_COMMANDS[cmd] then
+                                log("BATTLE", ">>> FOUND JSON cmd table in arg" .. i .. " (cmd=" .. decoded[1] .. ")")
+                                -- Decode ALL entries in this table
+                                local decodedTable = {}
+                                for key, val in pairs(arg) do
+                                    if type(val) == "string" and string.sub(val, 1, 1) == "[" then
+                                        local ok2, dec2 = pcall(function()
+                                            return HttpService:JSONDecode(val)
+                                        end)
+                                        if ok2 and type(dec2) == "table" then
+                                            decodedTable[key] = dec2
+                                        else
+                                            decodedTable[key] = val
+                                        end
+                                    elseif type(val) == "string" and string.sub(val, 1, 1) == "{" then
+                                        local ok2, dec2 = pcall(function()
+                                            return HttpService:JSONDecode(val)
+                                        end)
+                                        if ok2 and type(dec2) == "table" then
+                                            decodedTable[key] = dec2
+                                        else
+                                            decodedTable[key] = val
+                                        end
+                                    else
+                                        decodedTable[key] = val
+                                    end
+                                end
+                                cmdTable = decodedTable
+                                break
                             end
                         end
                     end
-                    log("DEBUG", "  total entries: " .. entryCount)
                 end
+                if cmdTable then break end
             end
         end
 
