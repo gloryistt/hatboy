@@ -949,42 +949,20 @@ local function processBattleCommands(commandTable)
 end
 
 --------------------------------------------------
--- FIND COMMAND TABLE IN ANY ARG
--- This is the critical function. It searches ALL
--- args (using select() to avoid #args issues)
--- for a table that contains battle command arrays.
+-- HOOK REMOTES
+-- CRITICAL: Do NOT use vararg forwarding to helper
+-- functions — Roblox executors break it.
+-- Instead, capture args into a table IMMEDIATELY
+-- at the top of the callback.
 --------------------------------------------------
+local hooked = {}
+local hookedCount = 0
+
 local KNOWN_COMMANDS = {
     player = true, owm = true, switch = true, start = true,
     move = true, damage = true, ["-damage"] = true,
     turn = true, faint = true, ["end"] = true,
 }
-
-local function findCommandTable(...)
-    local n = select("#", ...)
-    for i = 1, n do
-        local arg = select(i, ...)
-        if type(arg) == "table" then
-            -- Check if this table contains subtables with known command strings
-            for k, v in pairs(arg) do
-                if type(v) == "table" and type(v[1]) == "string" then
-                    local cmd = string.lower(v[1])
-                    if KNOWN_COMMANDS[cmd] then
-                        log("BATTLE", "Found command table in arg" .. i .. " (first cmd: " .. v[1] .. ")")
-                        return arg, i
-                    end
-                end
-            end
-        end
-    end
-    return nil
-end
-
---------------------------------------------------
--- HOOK REMOTES
---------------------------------------------------
-local hooked = {}
-local hookedCount = 0
 
 local function hookEvent(remote)
     if hooked[remote] then return end
@@ -992,16 +970,26 @@ local function hookEvent(remote)
     hookedCount = hookedCount + 1
 
     remote.OnClientEvent:Connect(function(...)
+        -- ============================================
+        -- STEP 0: Capture ALL args into a table IMMEDIATELY
+        -- Do not rely on ... after this point.
+        -- ============================================
+        local argCount = select("#", ...)
+        local allArgs = {}
+        for i = 1, argCount do
+            allArgs[i] = select(i, ...)
+        end
+        allArgs.n = argCount
+
         -- Discovery logging
         if discoveryMode then
-            local n = select("#", ...)
             local parts = {}
-            for i = 1, n do
-                local a = select(i, ...)
+            for i = 1, argCount do
+                local a = allArgs[i]
                 local info = "arg" .. i .. "=" .. type(a)
-                if type(a) == "string" then info = info .. '("' .. string.sub(a, 1, 20) .. '")'
+                if type(a) == "string" then
+                    info = info .. '("' .. string.sub(a, 1, 20) .. '")'
                 elseif type(a) == "table" then
-                    -- Use pairs to count since # can be unreliable
                     local c = 0
                     for _ in pairs(a) do c = c + 1 end
                     info = info .. "(n=" .. c .. ")"
@@ -1011,9 +999,8 @@ local function hookEvent(remote)
             addBattleLog("📡 " .. remote.Name .. " | " .. table.concat(parts, ", "), Color3.fromRGB(180, 180, 180))
 
             if VERBOSE_MODE then
-                local n2 = select("#", ...)
-                for i = 1, n2 do
-                    local a = select(i, ...)
+                for i = 1, argCount do
+                    local a = allArgs[i]
                     if type(a) == "table" then
                         log("EVT", remote.Name, "arg" .. i .. ":", tablePreview(a))
                     end
@@ -1021,34 +1008,110 @@ local function hookEvent(remote)
             end
         end
 
-        -- ===== BATTLE DETECTION =====
-        -- Step 1: Is this a battle-related event?
-        local arg1 = select(1, ...)
+        -- ============================================
+        -- STEP 1: Is this a battle event?
+        -- ============================================
         local isBattle = false
-
-        if type(arg1) == "string" then
-            local a1l = string.lower(arg1)
-            if string.find(a1l, "battle") then
+        if type(allArgs[1]) == "string" then
+            if string.lower(allArgs[1]):find("battle") then
                 isBattle = true
             end
         end
 
-        if isBattle then
-            -- Step 2: Find the command table using select() — avoids #args issues
-            local cmdTable, argIdx = findCommandTable(...)
-            if cmdTable then
-                processBattleCommands(cmdTable)
-            else
-                logDebug("BattleEvent no cmd table, arg3=" .. tostring(select(3, ...)))
+        -- ============================================
+        -- STEP 2: Find the command table
+        -- Search EVERY arg for a table containing
+        -- subtables whose [1] is a known command.
+        -- Uses BOTH pairs() AND direct indexing as
+        -- redundant methods.
+        -- ============================================
+        local cmdTable = nil
+
+        local searchFrom = isBattle and 1 or 1
+        for i = searchFrom, argCount do
+            local arg = allArgs[i]
+            if type(arg) == "table" then
+                local found = false
+
+                -- Method 1: pairs() iteration
+                for k, v in pairs(arg) do
+                    if type(v) == "table" then
+                        local first = v[1]
+                        if type(first) == "string" then
+                            local cmd = string.lower(first)
+                            if KNOWN_COMMANDS[cmd] then
+                                log("BATTLE", ">>> FOUND cmd table via pairs() in arg" .. i .. " key=" .. tostring(k) .. " cmd=" .. first)
+                                cmdTable = arg
+                                found = true
+                                break
+                            end
+                        end
+                    end
+                end
+
+                if found then break end
+
+                -- Method 2: Direct numeric indexing (1 to 20)
+                -- In case pairs() somehow skips entries
+                for j = 1, 20 do
+                    local v = arg[j]
+                    if v == nil then break end
+                    if type(v) == "table" then
+                        local first = v[1]
+                        if type(first) == "string" then
+                            local cmd = string.lower(first)
+                            if KNOWN_COMMANDS[cmd] then
+                                log("BATTLE", ">>> FOUND cmd table via index in arg" .. i .. " [" .. j .. "] cmd=" .. first)
+                                cmdTable = arg
+                                found = true
+                                break
+                            end
+                        end
+                    end
+                end
+
+                if found then break end
+
+                -- Method 3: rawget (bypass metatables)
+                -- Try key 1 directly with rawget
+                local raw1 = rawget(arg, 1)
+                if type(raw1) == "table" then
+                    local rawFirst = rawget(raw1, 1)
+                    if type(rawFirst) == "string" then
+                        local cmd = string.lower(rawFirst)
+                        if KNOWN_COMMANDS[cmd] then
+                            log("BATTLE", ">>> FOUND cmd table via rawget in arg" .. i .. " cmd=" .. rawFirst)
+                            cmdTable = arg
+                            break
+                        end
+                    end
+                end
+
+                -- Diagnostic: if this is a BattleEvent and this arg is a table, log what we see
+                if isBattle and VERBOSE_MODE then
+                    log("DEBUG", "  arg" .. i .. " is table, scanning entries:")
+                    local entryCount = 0
+                    for k, v in pairs(arg) do
+                        entryCount = entryCount + 1
+                        if entryCount <= 5 then
+                            log("DEBUG", "    key=" .. tostring(k) .. " type(v)=" .. type(v))
+                            if type(v) == "table" then
+                                log("DEBUG", "      v[1]=" .. tostring(v[1]) .. " type(v[1])=" .. type(v[1]))
+                            end
+                        end
+                    end
+                    log("DEBUG", "  total entries: " .. entryCount)
+                end
             end
-            return
         end
 
-        -- Fallback: check any table arg for commands (non-BattleEvent remotes)
-        local cmdTable = findCommandTable(...)
+        -- ============================================
+        -- STEP 3: Process battle data if found
+        -- ============================================
         if cmdTable then
-            log("BATTLE", "Fallback detection in " .. remote.Name)
             processBattleCommands(cmdTable)
+        elseif isBattle then
+            logDebug("BattleEvent no cmd table, arg3=" .. tostring(allArgs[3]))
         end
     end)
 end
@@ -1077,5 +1140,5 @@ pcall(function()
 end)
 
 addBattleLog("Hooked " .. hookedCount .. " remotes — READY", C.Green)
-log("INFO", "LumiWare v3.1 READY | Hooked " .. hookedCount .. " | Player: " .. PLAYER_NAME)
-sendNotification("⚡ LumiWare v3.1", "Hooked " .. hookedCount .. " remotes. Battle detection active.", 6)
+log("INFO", "LumiWare v3.2 READY | Hooked " .. hookedCount .. " | Player: " .. PLAYER_NAME)
+sendNotification("⚡ LumiWare v3.2", "Hooked " .. hookedCount .. " remotes. Battle detection active.", 6)
