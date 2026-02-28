@@ -1675,9 +1675,14 @@ local function performAutoAction()
             end
 
             ui = findBattleUI()
-            if ui and (ui.runButton or ui.fightButton) then
-                log("AUTO", "Battle UI ready after " .. string.format("%.1f", tick() - pollStart) .. "s")
-                break
+            if ui then
+                if autoMode == "run" and ui.runButton then
+                    log("AUTO", "Battle UI ready for RUN after " .. string.format("%.1f", tick() - pollStart) .. "s")
+                    break
+                elseif ui.runButton or ui.fightButton then
+                    log("AUTO", "Battle UI ready after " .. string.format("%.1f", tick() - pollStart) .. "s")
+                    break
+                end
             end
 
             task.wait(0.1)
@@ -1707,16 +1712,18 @@ local function performAutoAction()
                 turnCount = turnCount + 1
                 if rareFoundPause or autoMode ~= "move" then break end
 
-                -- Re-scan UI each turn (buttons refresh per turn)
-                local turnUI = findBattleUI()
-                if not turnUI then
-                    log("AUTO", "Auto-MOVE: BattleGui gone, battle over after " .. turnCount - 1 .. " turns")
-                    break
+                -- Re-scan UI each turn (wait up to 10s for it to reappear if transitioning)
+                local turnUI = nil
+                local turnStart = tick()
+                while (tick() - turnStart) < 10 do
+                    if rareFoundPause or autoMode ~= "move" then break end
+                    turnUI = findBattleUI()
+                    if turnUI and (turnUI.fightButton or #turnUI.moveButtons > 0) then break end
+                    task.wait(0.5)
                 end
 
-                -- If no Fight button and no moves, battle might be over
-                if not turnUI.fightButton and #turnUI.moveButtons == 0 then
-                    log("AUTO", "Auto-MOVE: no Fight/Move buttons, battle likely over")
+                if not turnUI or (not turnUI.fightButton and #turnUI.moveButtons == 0) then
+                    log("AUTO", "Auto-MOVE: BattleGui gone, battle over after " .. turnCount - 1 .. " turns")
                     break
                 end
 
@@ -1734,7 +1741,8 @@ local function performAutoAction()
                     local moveStart = tick()
                     while (tick() - moveStart) < 4 do
                         moveUI = findBattleUI()
-                        if moveUI and (moveUI.moveButtons[autoMoveSlot] or #moveUI.moveButtons > 0) then
+                        -- Explicitly wait for the UI to exist *and* have moves
+                        if moveUI and (#moveUI.moveButtons > 0) then
                             break
                         end
                         task.wait(0.3)
@@ -1770,20 +1778,17 @@ local function performAutoAction()
                 -- Then wait for either battle to end or next turn to start
                 task.wait(3)
 
-                -- Poll for next turn — wait until Fight/Run reappears or BattleGui is gone
+                -- Poll for next turn — wait until Fight/Run reappears
+                -- REMOVED "break if not checkUI", because it legally vanishes during attacks
                 local waitStart = tick()
                 while (tick() - waitStart) < 15 do
                     if rareFoundPause or autoMode ~= "move" then break end
                     local checkUI = findBattleUI()
-                    if not checkUI then
-                        log("AUTO", "Battle ended (BattleGui gone)")
-                        break
-                    end
-                    if checkUI.fightButton or checkUI.runButton then
+                    if checkUI and (checkUI.fightButton or checkUI.runButton) then
                         log("AUTO", "Next turn ready")
                         break
                     end
-                    task.wait(0.5)
+                    task.wait(1)
                 end
 
                 -- Check if battle ended
