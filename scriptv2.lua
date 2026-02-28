@@ -1555,50 +1555,12 @@ local function findBattleUI()
         moveNames = {},
     }
 
-    -- METHOD 1: Direct path (fastest)
-    local battleGui = nil
-    local mainGui = pgui:FindFirstChild("MainGui")
-    if mainGui then
-        local frame = mainGui:FindFirstChild("Frame")
-        if frame then
-            battleGui = frame:FindFirstChild("BattleGui")
-        end
-    end
-
-    -- METHOD 2: Recursive search (fallback)
-    if not battleGui then
-        log("AUTO", "findBattleUI: direct path failed, trying recursive...")
-        battleGui = pgui:FindFirstChild("BattleGui", true)
-    end
-
-    -- METHOD 3: WaitForChild with short timeout
-    if not battleGui and mainGui then
-        log("AUTO", "findBattleUI: recursive failed, trying WaitForChild...")
-        pcall(function()
-            local frame = mainGui:FindFirstChild("Frame") or mainGui:FindFirstChild("Frame", true)
-            if frame then
-                battleGui = frame:WaitForChild("BattleGui", 3)
-            end
-        end)
-    end
+    -- METHOD 1: Fast Recursive search (Fastest for deeply nested dynamic GUI)
+    local battleGui = pgui:FindFirstChild("BattleGui", true)
 
     if not battleGui then
-        log("AUTO", "findBattleUI: BattleGui NOT FOUND anywhere")
-        if mainGui then
-            log("AUTO", "  MainGui children:")
-            for _, ch in ipairs(mainGui:GetChildren()) do
-                log("AUTO", "    " .. ch.Name .. " (" .. ch.ClassName .. ")")
-                if ch.Name == "Frame" or ch:IsA("Frame") then
-                    for _, ch2 in ipairs(ch:GetChildren()) do
-                        log("AUTO", "      " .. ch2.Name .. " (" .. ch2.ClassName .. ")")
-                    end
-                end
-            end
-        end
         return nil
     end
-
-    log("AUTO", "findBattleUI: BattleGui FOUND, scanning children...")
 
     -- Run button: BattleGui/Run/Button
     local runContainer = battleGui:FindFirstChild("Run")
@@ -1656,13 +1618,6 @@ local function findBattleUI()
             end
         end
     end
-
-    -- Log summary
-    local parts = {}
-    if result.runButton then table.insert(parts, "Run") end
-    if result.fightButton then table.insert(parts, "Fight") end
-    table.insert(parts, #result.moveButtons .. " moves")
-    log("AUTO", "  Found: " .. table.concat(parts, ", "))
 
     return result
 end
