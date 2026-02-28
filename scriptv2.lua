@@ -661,6 +661,9 @@ whSave.MouseButton1Click:Connect(function()
     end
 end)
 
+-- Forward declarations (needed by automation panel handlers)
+local addBattleLog
+
 -- ============================================
 -- AUTOMATION PANEL
 -- ============================================
@@ -900,7 +903,7 @@ bll.SortOrder = Enum.SortOrder.LayoutOrder
 bll.Padding = UDim.new(0, 2)
 
 local blOrder, blCount = 0, 0
-local function addBattleLog(text, color)
+addBattleLog = function(text, color)
     blOrder = blOrder + 1
     blCount = blCount + 1
     local item = Instance.new("TextLabel")
@@ -1023,8 +1026,8 @@ local function startAutoWalk()
         local humanoid = char:WaitForChild("Humanoid")
         local rootPart = char:WaitForChild("HumanoidRootPart")
         local center = rootPart.Position
-        local radius = 15
-        local numPoints = 8
+        local radius = 6
+        local numPoints = 6
         local pointIndex = 0
 
         while autoWalkEnabled and gui.Parent do
