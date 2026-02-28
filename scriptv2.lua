@@ -1369,41 +1369,41 @@ local function updateAutoUI()
     end
 end
 
-offBtn.MouseButton1Click:Connect(function()
+track(offBtn.MouseButton1Click:Connect(function()
     autoMode = "off"
     config.autoMode = autoMode
     saveConfig()
     rareFoundPause = false
     updateAutoUI()
     sendNotification("LumiWare", "Automation OFF", 3)
-end)
-moveBtn.MouseButton1Click:Connect(function()
+end))
+track(moveBtn.MouseButton1Click:Connect(function()
     autoMode = "move"
     config.autoMode = autoMode
     saveConfig()
     rareFoundPause = false
     updateAutoUI()
     sendNotification("LumiWare", "Auto-MOVE slot " .. autoMoveSlot, 3)
-end)
-runBtn.MouseButton1Click:Connect(function()
+end))
+track(runBtn.MouseButton1Click:Connect(function()
     autoMode = "run"
     config.autoMode = autoMode
     saveConfig()
     rareFoundPause = false
     updateAutoUI()
     sendNotification("LumiWare", "Auto-RUN enabled", 3)
-end)
+end))
 for s = 1, 4 do
-    slotBtns[s].MouseButton1Click:Connect(function()
+    track(slotBtns[s].MouseButton1Click:Connect(function()
         autoMoveSlot = s
         config.autoMoveSlot = s
         saveConfig()
         updateAutoUI()
-    end)
+    end))
     addHoverEffect(slotBtns[s], C.PanelAlt, C.AccentDim)
 end
 
-slotInput.FocusLost:Connect(function()
+track(slotInput.FocusLost:Connect(function()
     local num = tonumber(slotInput.Text)
     if num and num >= 1 and num <= 4 then
         autoMoveSlot = math.floor(num)
@@ -1411,7 +1411,7 @@ slotInput.FocusLost:Connect(function()
         saveConfig()
     end
     updateAutoUI()
-end)
+end))
 
 updateAutoUI()
 
