@@ -1541,6 +1541,8 @@ local function isVisible(obj)
     return true
 end
 
+local cachedMoveNames = {}
+
 local function findBattleUI()
     local pgui = player:FindFirstChild("PlayerGui")
     if not pgui then
@@ -1600,21 +1602,28 @@ local function findBattleUI()
     end
 
     -- Move buttons: BattleGui/Move1/Button through Move4/Button
+    -- OPTIMIZATION: directly access children without FindFirstChild where possible if they exist
     for i = 1, 4 do
         local moveContainer = battleGui:FindFirstChild("Move" .. i)
-        if moveContainer and isVisible(moveContainer) then
+        if moveContainer and moveContainer.Visible then
             local moveBtn = moveContainer:FindFirstChild("Button")
-            if moveBtn and isVisible(moveBtn) then
+            if moveBtn and moveBtn.Visible then
                 result.moveButtons[i] = moveBtn
                 
-                -- Try to find the TextLabel containing the move's name
-                local txt = moveContainer:FindFirstChildOfClass("TextLabel")
-                if not txt and moveBtn then
-                    txt = moveBtn:FindFirstChildOfClass("TextLabel")
+                -- Fast text extraction: only search for text if we haven't cached it yet for this battle
+                -- (Move names don't change mid-battle, so we only need to read the UI text once)
+                if not cachedMoveNames[i] then
+                    local txt = moveContainer:FindFirstChildOfClass("TextLabel")
+                    if not txt then
+                        txt = moveBtn:FindFirstChildOfClass("TextLabel")
+                    end
+                    if txt and txt.Text and txt.Text ~= "" then
+                        cachedMoveNames[i] = txt.Text:lower()
+                    end
                 end
-                if txt and txt.Text then
-                    result.moveNames[i] = txt.Text:lower()
-                end
+                
+                -- Always assign the cached or newly found name to the result
+                result.moveNames[i] = cachedMoveNames[i]
             end
         end
     end
@@ -2069,6 +2078,7 @@ local function processBattleCommands(commandTable)
 
     if enemyName ~= "Unknown" and not currentBattle.enemyProcessed then
         currentBattle.enemyProcessed = true
+        cachedMoveNames = {} -- Reset move cache for new enemy encounters
 
         if currentBattle.battleType == "Wild" then
             encounterCount = encounterCount + 1
