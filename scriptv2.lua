@@ -1604,9 +1604,9 @@ local function findBattleUI()
             if isVisible(child) then
                 local cname = child.Name:lower()
                 -- It's either explicitly named "fight/attack" OR it's just an ImageLabel containing a Button, 
-                -- but NOT one of the known others (Run, Bag, Loomians, Items)
+                -- but NOT one of the known others (Run, Bag, Loomians, Items, or Moves)
                 if cname == "fight" or string.find(cname, "fight") or string.find(cname, "attack") or 
-                   (child:IsA("ImageLabel") and cname ~= "run" and cname ~= "bag" and cname ~= "loomians" and cname ~= "items") then
+                   (child:IsA("ImageLabel") and cname ~= "run" and cname ~= "bag" and cname ~= "loomians" and cname ~= "items" and not string.find(cname, "move")) then
                     
                     local btn = child:FindFirstChild("Button")
                     if btn and isVisible(btn) then
