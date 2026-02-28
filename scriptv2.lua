@@ -128,6 +128,166 @@ local function isRareLoomian(name)
     return false
 end
 
+--------------------------------------------------
+-- MASTERY DATA (135 families)
+--------------------------------------------------
+local MASTERY_DATA = {
+    {f="Embit/Rabburn/Searknight",t={{"D",0,200},{"E",30000,300},{"R",50,400},{"K",30,100}}},
+    {f="Dripple/Reptide/Luminami",t={{"D",0,200},{"E",30000,300},{"R",50,400},{"K",30,100}}},
+    {f="Fevine/Felver/Tahtab",t={{"D",0,200},{"E",30000,300},{"R",50,400},{"K",30,100}}},
+    {f="Eaglit/Torprey/Falkyrie",t={{"D",0,200},{"E",30000,300},{"R",50,400},{"K",30,100}}},
+    {f="Vambat/Dimpire/Vesperatu",t={{"D",0,200},{"E",30000,300},{"R",50,400},{"K",30,100}}},
+    {f="Snocub/Snowki/Himbrr",t={{"D",0,200},{"E",30000,300},{"R",50,400},{"K",30,100}}},
+    {f="Weevolt/Stozap/Zuelong",t={{"D",0,200},{"E",30000,300},{"R",50,400},{"K",30,100}}},
+    {f="Twilat/Umbrat/Luxoar/Tiklipse",t={{"D",0,200},{"C",10,200},{"K",20,400},{"R",10,200}}},
+    {f="Cathorn/Propae/Cynamoth/Sumobito",t={{"E",20000,300},{"PA",10,200},{"SL",10,200},{"K",25,300}}},
+    {f="Twittle/Paratweet/Avitross",t={{"DD",1000,300},{"C",5,200},{"E",20000,300},{"K",15,200}}},
+    {f="Pyder/Swolder",t={{"R",20,300},{"LU",30,200},{"DD",1000,200},{"C",5,300}}},
+    {f="Antsee/Florant",t={{"E",20000,300},{"C",5,200},{"R",20,400},{"K",10,100}}},
+    {f="Grubby/Coonucopia/Terrafly/Terraclaw",t={{"K",20,300},{"C",5,200},{"LU",30,400},{"D",0,100}}},
+    {f="Kleptyke/Ragoon",t={{"DD",800,200},{"K",10,400},{"R",20,100},{"C",5,300}}},
+    {f="Babore/Boarrok",t={{"E",20000,300},{"C",5,200},{"K",15,200},{"KSE",15,300}}},
+    {f="Geklow/Eleguana",t={{"FB",0,500},{"R",5,100},{"KSE",5,200},{"DC",10,200}}},
+    {f="Slugling/Escargrow/Gastroak",t={{"K",15,300},{"R",10,200},{"C",5,200},{"E",20000,300}}},
+    {f="Kabunga/Wiki-Wiki/Chartiki/Waka-Laka/Thawmin",t={{"D",3,400},{"R",10,200},{"K",15,200},{"E",15000,200}}},
+    {f="Shawchi",t={{"K",5,300},{"C",5,400},{"R",5,100},{"DD",1000,200}}},
+    {f="Rakrawla/Sedimars",t={{"LU",30,300},{"C",5,200},{"K",10,300},{"DD",500,200}}},
+    {f="Gumpod/Ventacean",t={{"BU",5,400},{"FB",0,400},{"KSE",5,100},{"R",5,100}}},
+    {f="Phancub/Ursoul/Ursnac",t={{"K",10,200},{"R",10,200},{"E",15000,200},{"FB",0,400}}},
+    {f="Whispup/Revenine",t={{"LU",30,300},{"C",5,200},{"K",30,300},{"KSE",15,200}}},
+    {f="Skilava/Geksplode/Eruptidon",t={{"DD",1000,300},{"K",20,200},{"K",15,200},{"DC",15,300}}},
+    {f="Craytal/Krakaloa/Volkaloa/Festifir/Leshent",t={{"D",3,400},{"R",15,200},{"DD",1000,200},{"KSE",10,200}}},
+    {f="Igneol/Chrysite/Obsidrugon",t={{"C",2,300},{"LU",30,300},{"R",10,200},{"D",0,200}}},
+    {f="Cafnote/Trumbull/Mootune",t={{"D",0,300},{"E",15000,200},{"C",5,200},{"FB",0,300}}},
+    {f="Gobbidemic",t={{"C",5,300},{"R",10,200},{"K",5,200},{"KSE",15,300}}},
+    {f="Icigool",t={{"E",20000,300},{"K",30,400},{"KSE",15,300}}},
+    {f="Pyramind/Pharoglyph",t={{"D",0,500},{"C",3,300},{"K",20,200}}},
+    {f="Burroach/Garbantis",t={{"C",3,200},{"K",15,200},{"E",20000,300},{"R",10,300}}},
+    {f="Whimpor/Stratusoar",t={{"DD",1000,200},{"FB",0,300},{"R",10,200},{"KSE",15,300}}},
+    {f="Territi/Dyeborg",t={{"LU",30,200},{"C",5,200},{"K",40,400},{"DD",1000,200}}},
+    {f="Operaptor/Concredon/Tyrecks",t={{"K",3,300},{"E",20000,300},{"DD",2000,300},{"R",10,100}}},
+    {f="Chompactor/Munchweel",t={{"C",5,200},{"K",10,200},{"E",20000,400},{"KSE",5,200}}},
+    {f="Scorb/Veylens/Gardrone",t={{"D",0,400},{"PA",1,200},{"BU",1,200},{"FR",1,200}}},
+    {f="Poochrol/Hunder",t={{"K",35,200},{"LU",30,200},{"DD",1500,200},{"FB",0,300}}},
+    {f="Goppie/Arapaigo",t={{"C",10,300},{"K",20,200},{"E",20000,200},{"R",20,300}}},
+    {f="Pyke/Skelic",t={{"D",0,500},{"E",25000,500}}},
+    {f="Zaleo/Joltooth",t={{"D",0,500},{"E",25000,500}}},
+    {f="Dobo/Infernix",t={{"D",0,500},{"E",25000,500}}},
+    {f="Kyogo/Dorogo",t={{"D",0,500},{"E",25000,500}}},
+    {f="Wiledile/Mawamurk",t={{"K",15,200},{"DC",10,400},{"R",20,200},{"LU",45,200}}},
+    {f="Ampole/Amphiton/Meditoad",t={{"C",5,200},{"E",20000,300},{"PA",10,200},{"KSE",15,300}}},
+    {f="Pwuff/Bloatox/Barblast",t={{"C",5,200},{"LU",40,100},{"DC",10,400},{"PO",10,300}}},
+    {f="Swimp/Snapr/Garlash",t={{"K",15,200},{"R",20,200},{"E",20000,300},{"KSE",15,300}}},
+    {f="Hydrini/Bezeldew/Deludrix",t={{"D",0,300},{"K",45,200},{"E",20000,200},{"KSE",15,300}}},
+    {f="Ceratot/Trepodon/Colossotrops",t={{"D",0,500},{"E",30000,500}}},
+    {f="Cupoink/Hoganosh",t={{"KSE",15,200},{"BU",5,300},{"E",20000,200},{"DD",2000,300}}},
+    {f="Mochibi/Totemochi/Mocho",t={{"KSE",15,200},{"FR",3,300},{"E",20000,200},{"DD",2000,300}}},
+    {f="Gwurm/Odasho/Spreezy",t={{"KSE",15,200},{"R",20,300},{"E",20000,200},{"DD",2000,300}}},
+    {f="Pipsee/Dandylil/Whippledriff",t={{"D",0,300},{"K",45,200},{"E",20000,200},{"KSE",15,300}}},
+    {f="Vari/Cervolen/Wendolen/+evos",t={{"C",1,400},{"E",20000,200},{"R",20,200},{"KSE",15,200}}},
+    {f="Copling/Copperage/Oxidrake",t={{"KSE",10,200},{"E",20000,300},{"D",0,200},{"C",3,300}}},
+    {f="Spirivii/Eidohusk/Harvesect",t={{"D",0,200},{"E",20000,300},{"K",30,300},{"R",10,200}}},
+    {f="Snowl/Stricicle/Wintrix",t={{"E",20000,300},{"R",10,200},{"KSE",10,200},{"FR",2,300}}},
+    {f="Snagull/Snagulp/Snagoop",t={{"PO",5,300},{"C",5,200},{"DD",2000,300},{"R",10,200}}},
+    {f="Makame/Makoro/Tsukame",t={{"C",3,300},{"E",20000,200},{"KSE",5,200},{"DD",3000,300}}},
+    {f="Cavenish/Banfino",t={{"K",25,300},{"DD",2000,300},{"R",10,200},{"E",20000,200}}},
+    {f="Kanki/Kanibo",t={{"K",30,300},{"C",5,200},{"E",20000,300},{"DD",2000,200}}},
+    {f="Sharpod/Samarine",t={{"KSE",15,400},{"E",20000,100},{"C",3,300},{"DD",2000,200}}},
+    {f="Lumica/Lumello",t={{"PO",5,400},{"E",20000,300},{"C",4,200},{"R",10,100}}},
+    {f="Polypi/Laphyra/Jellusa",t={{"K",20,300},{"C",5,200},{"R",10,300},{"E",20000,200}}},
+    {f="Taoshi/Taoshinu",t={{"C",5,300},{"K",30,200},{"R",20,200},{"DD",3000,300}}},
+    {f="Kittone/Lyricat",t={{"R",25,300},{"C",5,200},{"DD",2000,200},{"E",25000,300}}},
+    {f="Boonary",t={{"K",30,300},{"E",20000,300},{"DD",3000,400}}},
+    {f="Somata/Clionae",t={{"E",20000,200},{"K",15,300},{"R",5,200},{"DD",2000,300}}},
+    {f="Cinnaboo/Cinnogre",t={{"E",20000,300},{"R",25,200},{"DD",2000,200},{"KSE",5,300}}},
+    {f="Swirelle",t={{"E",20000,300},{"DD",2000,200},{"KSE",5,300},{"R",20,200}}},
+    {f="Swishy/Fiscarna",t={{"E",20000,300},{"DD",2000,200},{"KSE",5,300},{"R",20,200}}},
+    {f="Bunpuff/Bunnecki",t={{"E",20000,300},{"DD",2000,200},{"KSE",5,300},{"R",20,200}}},
+    {f="Dractus/Frutress/Seedrake",t={{"E",20000,300},{"DD",2000,200},{"KSE",5,300},{"R",20,200}}},
+    {f="Volpup/Halvantic",t={{"E",20000,300},{"DD",2000,200},{"KSE",5,300},{"R",20,200}}},
+    {f="Impkin/Grimmick/Imperior",t={{"E",20000,300},{"DD",2000,200},{"KSE",5,300},{"R",20,200}}},
+    {f="Mistlebud/Hollibunch",t={{"E",20000,300},{"DD",2000,200},{"KSE",5,300},{"R",20,200}}},
+    {f="Cryocub/Barbadger",t={{"E",20000,300},{"DD",2000,200},{"KSE",5,300},{"R",20,200}}},
+    {f="Kyeggo/Doreggo/Dreggodyne",t={{"DD",2500,300},{"R",10,200},{"KSE",8,200},{"E",25000,300}}},
+    {f="Wispur/Lampurge/Charonyx",t={{"D",0,300},{"K",45,200},{"E",20000,200},{"KSE",15,300}}},
+    {f="Smoal/Charkiln/Billoforge",t={{"D",0,300},{"K",45,200},{"E",20000,200},{"KSE",15,300}}},
+    {f="Sherbot",t={{"E",20000,200},{"KSE",6,300},{"R",10,300},{"DD",2000,200}}},
+    {f="Llamba/Choochew/Loomala",t={{"D",0,400},{"C",1,200},{"R",10,100},{"DD",2000,200}}},
+    {f="Fentern/Weaselin",t={{"R",10,200},{"DD",1500,200},{"C",3,400},{"E",20000,200}}},
+    {f="Singeel/Moreel",t={{"DD",2000,200},{"C",5,300},{"E",20000,400},{"R",5,100}}},
+    {f="Crabushi/Crabtana",t={{"C",5,200},{"K",10,300},{"R",10,300},{"DD",2000,200}}},
+    {f="Teripod/Teridescent",t={{"KSE",10,200},{"DD",1500,300},{"R",5,300},{"E",15000,200}}},
+    {f="Skampi/Prawnsu/Shrimposte",t={{"D",0,400},{"C",5,200},{"R",10,200},{"DD",1000,200}}},
+    {f="Dokan/Dokumori",t={{"KSE",10,200},{"DD",1500,300},{"R",5,300},{"E",15000,200}}},
+    {f="Mirrami/Mirraith",t={{"R",10,300},{"DD",2000,300},{"E",10000,200},{"KSE",5,200}}},
+    {f="Kayute/Kayappa/Kramboss",t={{"E",10000,300},{"DD",1000,200},{"KSE",10,200},{"R",10,300}}},
+    {f="Leopaw/Chienta",t={{"E",10000,200},{"DD",1000,300},{"KSE",10,300},{"R",10,200}}},
+    {f="Eyebrella/Parasoul",t={{"K",5,400},{"E",10000,300},{"DD",2000,200},{"R",5,100}}},
+    {f="Lissen/Biwarned",t={{"K",5,400},{"E",10000,300},{"DD",2000,200},{"R",5,100}}},
+    {f="Lantot/Lantorch",t={{"K",5,400},{"E",10000,300},{"DD",2000,200},{"R",5,100}}},
+    {f="Milgoo/Rancidor",t={{"K",5,400},{"E",10000,300},{"DD",2000,200},{"R",5,100}}},
+    {f="Nautling/Nautillect/Naukout",t={{"D",0,500},{"E",20000,500}}},
+    {f="Yutiny/Yuteen/Yutyphoon",t={{"D",0,500},{"E",20000,500}}},
+    {f="Venile/Verinox/Verinosaur",t={{"D",0,500},{"E",20000,500}}},
+    {f="Nymvolt/Ohmbolt/Plasmoth",t={{"D",0,300},{"K",35,200},{"E",20000,200},{"KSE",10,300}}},
+    {f="Cicalute/Violana",t={{"DD",1000,200},{"R",15,300},{"KSE",10,300},{"LU",15,200}}},
+    {f="Goswing/Ganderveil",t={{"DC",5,300},{"K",20,200},{"E",15000,200},{"R",10,300}}},
+    {f="Banooh/Banokey",t={{"DD",1500,300},{"K",20,300},{"R",20,200},{"LU",15,200}}},
+    {f="Spirwix/Malevowax",t={{"BU",5,300},{"KSE",10,200},{"R",20,200},{"LU",15,300}}},
+    {f="Grievestone/Obelost",t={{"FB",0,300},{"K",20,200},{"R",20,200},{"E",15000,300}}},
+    {f="Jimby/Piccolio",t={{"DD",1300,300},{"K",20,300},{"R",15,200},{"E",12000,200}}},
+    {f="Wassel/Borealisk",t={{"K",20,300},{"DD",1000,200},{"R",10,200},{"LU",25,300}}},
+    {f="Snicle/Slivyce",t={{"LU",15,200},{"R",10,300},{"KSE",10,300},{"DD",1000,200}}},
+    {f="Nukichi/Dainuki",t={{"R",5,200},{"DD",1000,200},{"LU",15,300},{"FB",0,300}}},
+    {f="Terracolt/Broncotta",t={{"R",5,200},{"KSE",10,300},{"DD",1000,300},{"E",10000,200}}},
+    {f="Duskit",t={{"C",1,500},{"E",30000,500}}},
+    {f="Ikazune",t={{"C",1,500},{"E",30000,500}}},
+    {f="Protogon",t={{"C",1,500},{"E",30000,500}}},
+    {f="Dakuda",t={{"C",1,500},{"E",20000,500}}},
+    {f="Cosmeleon",t={{"C",1,500},{"E",20000,500}}},
+    {f="Mutagon",t={{"C",1,500},{"E",30000,500}}},
+    {f="Cephalops",t={{"C",1,500},{"K",35,500}}},
+    {f="Elephage/Phagenaut",t={{"C",1,500},{"E",30000,500}}},
+    {f="Glacadia",t={{"C",1,500},{"E",20000,500}}},
+    {f="Arceros",t={{"C",1,500},{"E",20000,500}}},
+    {f="Novadeaus",t={{"E",20000,1000}}},
+    {f="Morphezu",t={{"E",20000,1000}}},
+    {f="Behemoroth",t={{"E",20000,1000}}},
+    {f="Leviatross",t={{"E",20000,1000}}},
+    {f="Cosmiore",t={{"C",1,500},{"E",30000,500}}},
+    {f="Solnecta",t={{"C",1,500},{"K",35,500}}},
+    {f="Nymaurae",t={{"C",1,500},{"K",35,500}}},
+    {f="Nymesis",t={{"C",1,500},{"K",35,500}}},
+    {f="Metronette",t={{"C",1,1000}}},
+    {f="Nevermare",t={{"C",1,500},{"K",35,500}}},
+    {f="Gargolem",t={{"C",1,500},{"E",30000,500}}},
+    {f="Odoyaga",t={{"C",1,500},{"E",20000,500}}},
+    {f="Wabalisc",t={{"C",1,500},{"E",30000,500}}},
+    {f="Akhalos",t={{"C",1,500},{"E",30000,500}}},
+    {f="Celesting",t={{"C",1,500},{"E",30000,500}}},
+    {f="Mimask",t={{"C",1,500},{"E",20000,500}}},
+    {f="Grimyuline",t={{"C",1,500},{"E",20000,500}}},
+}
+local TASK_NAMES = {
+    D="Discover all stages", E="Earn Experience", R="Rally", K="KO Loomians",
+    C="Capture", DD="Deal Damage", KSE="KO w/ Super Effective", DC="Deal Crits",
+    LU="Level Up", FB="Form Perfect Bond", BU="Burn Loomians", PA="Paralyze",
+    SL="Put to Sleep", PO="Poison Loomians", FR="Inflict Frostbite"
+}
+local function searchMastery(query)
+    if not query or query == "" then return {} end
+    local q = string.lower(query)
+    local results = {}
+    for _, entry in ipairs(MASTERY_DATA) do
+        if string.find(string.lower(entry.f), q) then
+            table.insert(results, entry)
+        end
+    end
+    return results
+end
+local sessionKOs = 0
+local sessionDamage = 0
+
 local function sendNotification(title, text, duration)
     pcall(function()
         StarterGui:SetCore("SendNotification", { Title = title, Text = text, Duration = duration or 5 })
@@ -389,12 +549,203 @@ UserInputService.InputChanged:Connect(function(input)
     end
 end)
 
--- CONTENT
-local contentFrame = Instance.new("Frame", mainFrame)
-contentFrame.Name = "Content"
-contentFrame.Size = UDim2.new(1, -16, 1, -44)
-contentFrame.Position = UDim2.new(0, 8, 0, 40)
+-- TAB SELECTION UI
+local tabBar = Instance.new("Frame", mainFrame)
+tabBar.Size = UDim2.new(1, -16, 0, 32)
+tabBar.Position = UDim2.new(0, 8, 0, 44)
+tabBar.BackgroundTransparency = 1
+
+local huntTabBtn = Instance.new("TextButton", tabBar)
+huntTabBtn.Size = UDim2.new(0.5, -4, 1, 0)
+huntTabBtn.Position = UDim2.new(0, 0, 0, 0)
+huntTabBtn.BackgroundColor3 = C.Accent
+huntTabBtn.Text = "🗡️ HUNT"
+huntTabBtn.Font = Enum.Font.GothamBold
+huntTabBtn.TextSize = 13
+huntTabBtn.TextColor3 = C.Text
+huntTabBtn.BorderSizePixel = 0
+Instance.new("UICorner", huntTabBtn).CornerRadius = UDim.new(0, 6)
+
+local masteryTabBtn = Instance.new("TextButton", tabBar)
+masteryTabBtn.Size = UDim2.new(0.5, -4, 1, 0)
+masteryTabBtn.Position = UDim2.new(0.5, 4, 0, 0)
+masteryTabBtn.BackgroundColor3 = C.PanelAlt
+masteryTabBtn.Text = "📖 MASTERY"
+masteryTabBtn.Font = Enum.Font.GothamBold
+masteryTabBtn.TextSize = 13
+masteryTabBtn.TextColor3 = C.TextDim
+masteryTabBtn.BorderSizePixel = 0
+Instance.new("UICorner", masteryTabBtn).CornerRadius = UDim.new(0, 6)
+
+-- CONTENT WRAPPER
+local contentContainer = Instance.new("Frame", mainFrame)
+contentContainer.Name = "ContentContainer"
+contentContainer.Size = UDim2.new(1, -16, 1, -84)
+contentContainer.Position = UDim2.new(0, 8, 0, 80)
+contentContainer.BackgroundTransparency = 1
+
+-- MASTERY FRAME
+local masteryFrame = Instance.new("Frame", contentContainer)
+masteryFrame.Size = UDim2.new(1, 0, 1, 0)
+masteryFrame.BackgroundTransparency = 1
+masteryFrame.Visible = false
+
+local masterySearch = Instance.new("TextBox", masteryFrame)
+masterySearch.Size = UDim2.new(1, 0, 0, 36)
+masterySearch.BackgroundColor3 = C.Panel
+masterySearch.Text = ""
+masterySearch.PlaceholderText = "🔍 Search Loomian..."
+masterySearch.Font = Enum.Font.GothamBold
+masterySearch.TextSize = 13
+masterySearch.TextColor3 = C.Text
+masterySearch.BorderSizePixel = 0
+masterySearch.ClearTextOnFocus = false
+Instance.new("UICorner", masterySearch).CornerRadius = UDim.new(0, 6)
+
+local searchPadding = Instance.new("UIPadding", masterySearch)
+searchPadding.PaddingLeft = UDim.new(0, 12)
+
+local masterySessionPanel = Instance.new("Frame", masteryFrame)
+masterySessionPanel.Size = UDim2.new(1, 0, 0, 24)
+masterySessionPanel.Position = UDim2.new(0, 0, 0, 44)
+masterySessionPanel.BackgroundTransparency = 1
+
+local sessionLbl = Instance.new("TextLabel", masterySessionPanel)
+sessionLbl.Size = UDim2.new(1, 0, 1, 0)
+sessionLbl.BackgroundTransparency = 1
+sessionLbl.Text = "Session: 0 KOs | 0.0k Damage"
+sessionLbl.Font = Enum.Font.GothamBold
+sessionLbl.TextSize = 11
+sessionLbl.TextColor3 = C.TextDim
+sessionLbl.TextXAlignment = Enum.TextXAlignment.Left
+
+local masteryScroll = Instance.new("ScrollingFrame", masteryFrame)
+masteryScroll.Size = UDim2.new(1, 0, 1, -76)
+masteryScroll.Position = UDim2.new(0, 0, 0, 76)
+masteryScroll.BackgroundTransparency = 1
+masteryScroll.BorderSizePixel = 0
+masteryScroll.ScrollBarThickness = 4
+masteryScroll.ScrollBarImageColor3 = C.AccentDim
+
+local masteryListLayout = Instance.new("UIListLayout", masteryScroll)
+masteryListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+masteryListLayout.Padding = UDim.new(0, 8)
+
+local function renderMasteryFamily(data)
+    local card = Instance.new("Frame")
+    card.Size = UDim2.new(1, -8, 0, 110)
+    card.BackgroundColor3 = C.Panel
+    card.BorderSizePixel = 0
+    Instance.new("UICorner", card).CornerRadius = UDim.new(0, 6)
+
+    local familyName = Instance.new("TextLabel", card)
+    familyName.Size = UDim2.new(1, -16, 0, 24)
+    familyName.Position = UDim2.new(0, 8, 0, 4)
+    familyName.BackgroundTransparency = 1
+    familyName.Text = string.gsub(data.f, "/", " → ")
+    familyName.Font = Enum.Font.GothamBold
+    familyName.TextSize = 13
+    familyName.TextColor3 = C.Accent
+    familyName.TextXAlignment = Enum.TextXAlignment.Left
+
+    for i, t in ipairs(data.t) do
+        local typ, amt, rwd = t[1], t[2], t[3]
+        
+        local taskRow = Instance.new("Frame", card)
+        taskRow.Size = UDim2.new(1, -16, 0, 18)
+        taskRow.Position = UDim2.new(0, 8, 0, 26 + (i-1)*20)
+        taskRow.BackgroundTransparency = 1
+
+        local checkLbl = Instance.new("TextLabel", taskRow)
+        checkLbl.Size = UDim2.new(0, 20, 1, 0)
+        checkLbl.BackgroundTransparency = 1
+        checkLbl.Text = "☐"
+        checkLbl.Font = Enum.Font.GothamBold
+        checkLbl.TextSize = 14
+        checkLbl.TextColor3 = C.TextDim
+
+        local descLbl = Instance.new("TextLabel", taskRow)
+        descLbl.Size = UDim2.new(1, -60, 1, 0)
+        descLbl.Position = UDim2.new(0, 24, 0, 0)
+        descLbl.BackgroundTransparency = 1
+        
+        local taskName = TASK_NAMES[typ] or typ
+        if amt > 0 then taskName = string.gsub(taskName, "Loomians", amt .. " Loomians") end
+        if typ == "E" then taskName = "Earn " .. tostring(amt) .. " EXP" end
+        if typ == "D" and amt > 0 then taskName = "Discover " .. amt .. " stages" end
+        if typ == "R" then taskName = "Rally " .. amt .. " times" end
+        if typ == "DD" then taskName = "Deal " .. amt .. " Damage" end
+        if typ == "C" then taskName = "Capture " .. amt .. (amt==1 and " time" or " times") end
+        if typ == "DC" then taskName = "Deal " .. amt .. " Critical Hits" end
+        if typ == "LU" then taskName = "Level up " .. amt .. " times" end
+        
+        descLbl.Text = taskName
+        descLbl.Font = Enum.Font.Gotham
+        descLbl.TextSize = 11
+        descLbl.TextColor3 = C.Text
+        descLbl.TextXAlignment = Enum.TextXAlignment.Left
+        
+        local rewardLbl = Instance.new("TextLabel", taskRow)
+        rewardLbl.Size = UDim2.new(0, 40, 1, 0)
+        rewardLbl.Position = UDim2.new(1, -40, 0, 0)
+        rewardLbl.BackgroundTransparency = 1
+        rewardLbl.Text = tostring(rwd) .. " MP"
+        rewardLbl.Font = Enum.Font.GothamBold
+        rewardLbl.TextSize = 10
+        rewardLbl.TextColor3 = C.Gold
+        rewardLbl.TextXAlignment = Enum.TextXAlignment.Right
+    end
+    
+    return card
+end
+
+local function populateMasteryList(query)
+    for _, v in ipairs(masteryScroll:GetChildren()) do
+        if v:IsA("Frame") then v:Destroy() end
+    end
+    
+    local results = searchMastery(query)
+    if not query or query == "" then results = MASTERY_DATA end
+    
+    local count = 0
+    for i = 1, math.min(#results, 50) do
+        local card = renderMasteryFamily(results[i])
+        card.Parent = masteryScroll
+        count = count + 1
+    end
+    masteryScroll.CanvasSize = UDim2.new(0, 0, 0, count * 118)
+end
+
+masterySearch:GetPropertyChangedSignal("Text"):Connect(function()
+    populateMasteryList(masterySearch.Text)
+end)
+populateMasteryList("")
+
+-- HUNT FRAME (Contains old contentFrame layout)
+local contentFrame = Instance.new("Frame", contentContainer)
+contentFrame.Name = "HuntFrame"
+contentFrame.Size = UDim2.new(1, 0, 1, 0)
 contentFrame.BackgroundTransparency = 1
+contentFrame.Visible = true
+
+-- TAB LOGIC
+huntTabBtn.MouseButton1Click:Connect(function()
+    contentFrame.Visible = true
+    masteryFrame.Visible = false
+    huntTabBtn.BackgroundColor3 = C.Accent
+    huntTabBtn.TextColor3 = C.Text
+    masteryTabBtn.BackgroundColor3 = C.PanelAlt
+    masteryTabBtn.TextColor3 = C.TextDim
+end)
+
+masteryTabBtn.MouseButton1Click:Connect(function()
+    contentFrame.Visible = false
+    masteryFrame.Visible = true
+    huntTabBtn.BackgroundColor3 = C.PanelAlt
+    huntTabBtn.TextColor3 = C.TextDim
+    masteryTabBtn.BackgroundColor3 = C.Accent
+    masteryTabBtn.TextColor3 = C.Text
+end)
 
 -- STATS BAR
 local statsBar = Instance.new("Frame", contentFrame)
@@ -713,7 +1064,7 @@ local offBtn = mkAutoBtn(autoPanel, "OFF", 56, 26, 50)
 local moveBtn = mkAutoBtn(autoPanel, "MOVE", 112, 26, 60)
 local runBtn = mkAutoBtn(autoPanel, "RUN", 178, 26, 50)
 
--- Move slot label + buttons
+-- Move slot label + textbox
 local slotLabel = Instance.new("TextLabel", autoPanel)
 slotLabel.Size = UDim2.new(0, 70, 0, 22)
 slotLabel.Position = UDim2.new(0, 8, 0, 52)
@@ -724,9 +1075,23 @@ slotLabel.TextSize = 11
 slotLabel.TextColor3 = C.TextDim
 slotLabel.TextXAlignment = Enum.TextXAlignment.Left
 
+local slotInput = Instance.new("TextBox", autoPanel)
+slotInput.Size = UDim2.fromOffset(36, 22)
+slotInput.Position = UDim2.new(0, 80, 0, 52)
+slotInput.BackgroundColor3 = C.AccentDim
+slotInput.Text = tostring(autoMoveSlot)
+slotInput.Font = Enum.Font.GothamBold
+slotInput.TextSize = 12
+slotInput.TextColor3 = C.Text
+slotInput.BorderSizePixel = 0
+slotInput.PlaceholderText = "1-4"
+slotInput.ClearTextOnFocus = false
+Instance.new("UICorner", slotInput).CornerRadius = UDim.new(0, 5)
+
+-- Quick slot buttons next to textbox
 local slotBtns = {}
 for s = 1, 4 do
-    local sb = mkAutoBtn(autoPanel, tostring(s), 78 + (s - 1) * 36, 52, 30)
+    local sb = mkAutoBtn(autoPanel, tostring(s), 122 + (s - 1) * 30, 52, 26)
     slotBtns[s] = sb
 end
 
@@ -754,6 +1119,7 @@ local function updateAutoUI()
         slotBtns[s].BackgroundColor3 = (autoMoveSlot == s and autoMode == "move") and C.Accent or C.AccentDim
     end
     slotLabel.TextColor3 = autoMode == "move" and C.Text or C.TextDim
+    slotInput.Text = tostring(autoMoveSlot)
     walkBtn.BackgroundColor3 = autoWalkEnabled and C.Green or C.AccentDim
     walkBtn.Text = autoWalkEnabled and "🚶 WALKING" or "🚶 AUTO-WALK"
     -- Status text
@@ -790,6 +1156,14 @@ for s = 1, 4 do
         updateAutoUI()
     end)
 end
+
+slotInput.FocusLost:Connect(function()
+    local num = tonumber(slotInput.Text)
+    if num and num >= 1 and num <= 4 then
+        autoMoveSlot = math.floor(num)
+    end
+    updateAutoUI()
+end)
 
 updateAutoUI()
 
@@ -997,7 +1371,7 @@ task.spawn(function()
         timerVal.Text = formatTime(elapsed)
         local minutes = elapsed / 60
         if minutes > 0 then epmVal.Text = string.format("%.1f", encounterCount / minutes) end
-        if battleState == "active" and (tick() - lastBattleTick) > 30 then
+        if battleState == "active" and (tick() - lastBattleTick) > 5 then
             battleState = "idle"; stateVal.Text = "Idle"; stateVal.TextColor3 = C.TextDim
         end
         task.wait(1)
@@ -1033,6 +1407,11 @@ local function startAutoWalk()
         while autoWalkEnabled and gui.Parent do
             -- Pause during battles
             if battleState == "active" then
+                -- Release shift while in battle
+                pcall(function()
+                    VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.LeftShift, false, game)
+                    VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.LeftShift, false, game)
+                end)
                 task.wait(0.5)
             else
                 -- Refresh character reference
@@ -1044,6 +1423,11 @@ local function startAutoWalk()
                     if not humanoid or not rootPart or humanoid.Health <= 0 then
                         task.wait(1)
                     else
+                        -- Hold shift for sprinting
+                        pcall(function()
+                            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.LeftShift, false, game)
+                        end)
+
                         -- Calculate next waypoint in circle
                         local angle = (pointIndex / numPoints) * math.pi * 2
                         local targetPos = center + Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius)
@@ -1067,6 +1451,10 @@ local function startAutoWalk()
                 end
             end
         end
+        -- Release shift when stopping
+        pcall(function()
+            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.LeftShift, false, game)
+        end)
         log("INFO", "Auto-walk stopped")
     end)
 end
@@ -1084,6 +1472,10 @@ local function stopAutoWalk()
             local rp = char:FindFirstChild("HumanoidRootPart")
             if h and rp then h:MoveTo(rp.Position) end
         end
+    end)
+    -- Release shift
+    pcall(function()
+        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.LeftShift, false, game)
     end)
 end
 
@@ -1120,6 +1512,7 @@ local function findBattleUI()
 
     local result = {
         runButton = nil,
+        fightButton = nil,
         moveButtons = {},
     }
 
@@ -1151,7 +1544,6 @@ local function findBattleUI()
     end
 
     if not battleGui then
-        -- Dump what's actually in MainGui for debugging
         log("AUTO", "findBattleUI: BattleGui NOT FOUND anywhere")
         if mainGui then
             log("AUTO", "  MainGui children:")
@@ -1167,7 +1559,7 @@ local function findBattleUI()
         return nil
     end
 
-    log("AUTO", "findBattleUI: BattleGui FOUND at " .. battleGui:GetFullName())
+    log("AUTO", "findBattleUI: BattleGui FOUND, scanning children...")
 
     -- Run button: BattleGui/Run/Button
     local runContainer = battleGui:FindFirstChild("Run")
@@ -1175,15 +1567,29 @@ local function findBattleUI()
         local runBtn = runContainer:FindFirstChild("Button")
         if runBtn then
             result.runButton = runBtn
-            log("AUTO", "  Run button: FOUND")
-        else
-            log("AUTO", "  Run/Button not found, Run children: ")
-            for _, ch in ipairs(runContainer:GetChildren()) do
-                log("AUTO", "    " .. ch.Name .. " (" .. ch.ClassName .. ")")
+        end
+    end
+
+    -- Fight button: BattleGui/Fight/Button or first ImageLabel with Button
+    local fightContainer = battleGui:FindFirstChild("Fight")
+    if fightContainer then
+        local fBtn = fightContainer:FindFirstChild("Button")
+        if fBtn then
+            result.fightButton = fBtn
+        end
+    end
+    -- Fallback: scan all direct children for Fight-like containers
+    if not result.fightButton then
+        for _, child in ipairs(battleGui:GetChildren()) do
+            local cname = child.Name:lower()
+            if cname == "fight" or string.find(cname, "fight") or string.find(cname, "attack") then
+                local btn = child:FindFirstChild("Button")
+                if btn then
+                    result.fightButton = btn
+                    break
+                end
             end
         end
-    else
-        log("AUTO", "  Run container not found in BattleGui")
     end
 
     -- Move buttons: BattleGui/Move1/Button through Move4/Button
@@ -1196,7 +1602,18 @@ local function findBattleUI()
             end
         end
     end
-    log("AUTO", "  Moves found: " .. #result.moveButtons .. "/4")
+
+    -- Log summary
+    local parts = {}
+    if result.runButton then table.insert(parts, "Run") end
+    if result.fightButton then table.insert(parts, "Fight") end
+    table.insert(parts, #result.moveButtons .. " moves")
+    log("AUTO", "  Found: " .. table.concat(parts, ", "))
+
+    -- Also log all BattleGui children for debugging
+    for _, ch in ipairs(battleGui:GetChildren()) do
+        logDebug("  BattleGui/" .. ch.Name .. " (" .. ch.ClassName .. ")")
+    end
 
     return result
 end
@@ -1235,13 +1652,13 @@ local function performAutoAction()
     if currentBattle.battleType ~= "Wild" then return end
 
     pendingAutoAction = true
+    log("AUTO", "performAutoAction triggered, mode=" .. autoMode)
 
     task.spawn(function()
         -- Poll for battle UI buttons to appear
-        -- The battle intro animation takes 3-4s before buttons show
         local ui = nil
         local pollStart = tick()
-        local maxWait = 10 -- seconds max
+        local maxWait = 10
 
         while (tick() - pollStart) < maxWait do
             if rareFoundPause or autoMode == "off" then
@@ -1250,7 +1667,7 @@ local function performAutoAction()
             end
 
             ui = findBattleUI()
-            if ui and (ui.runButton or ui.moveButtons[1]) then
+            if ui and (ui.runButton or ui.fightButton) then
                 log("AUTO", "Battle UI ready after " .. string.format("%.1f", tick() - pollStart) .. "s")
                 break
             end
@@ -1258,7 +1675,7 @@ local function performAutoAction()
             task.wait(0.5)
         end
 
-        if not ui or (not ui.runButton and not ui.moveButtons[1]) then
+        if not ui or (not ui.runButton and not ui.fightButton) then
             log("AUTO", "Battle UI not found after " .. maxWait .. "s")
             addBattleLog("⚠ Auto: Battle UI timed out", C.Orange)
             pendingAutoAction = false
@@ -1267,33 +1684,117 @@ local function performAutoAction()
 
         if autoMode == "run" then
             if ui.runButton then
-                log("AUTO", "Auto-RUN: clicking run button")
+                log("AUTO", "Auto-RUN: clicking Run")
                 addBattleLog("🤖 Auto-RUN ▸ fleeing", C.Cyan)
                 clickButton(ui.runButton)
             else
                 addBattleLog("⚠ Auto: Run button not found", C.Orange)
             end
         elseif autoMode == "move" then
-            -- Moves are directly accessible — no Fight button needed
-            if ui.moveButtons[autoMoveSlot] then
-                log("AUTO", "Auto-MOVE: clicking Move" .. autoMoveSlot)
-                addBattleLog("🤖 Auto-MOVE ▸ Move " .. autoMoveSlot, C.Green)
-                clickButton(ui.moveButtons[autoMoveSlot])
-            else
-                -- Fallback: try any available move
-                local clicked = false
-                for s = 1, 4 do
-                    if ui.moveButtons[s] then
-                        addBattleLog("🤖 Auto-MOVE ▸ Move " .. s .. " (fallback)", C.Green)
-                        clickButton(ui.moveButtons[s])
-                        clicked = true
+            -- BATTLE LOOP: repeat Fight → Move each turn until battle ends
+            local turnCount = 0
+            local maxTurns = 20 -- safety limit
+
+            while turnCount < maxTurns do
+                turnCount = turnCount + 1
+                if rareFoundPause or autoMode ~= "move" then break end
+
+                -- Re-scan UI each turn (buttons refresh per turn)
+                local turnUI = findBattleUI()
+                if not turnUI then
+                    log("AUTO", "Auto-MOVE: BattleGui gone, battle over after " .. turnCount - 1 .. " turns")
+                    break
+                end
+
+                -- If no Fight button and no moves, battle might be over
+                if not turnUI.fightButton and #turnUI.moveButtons == 0 then
+                    log("AUTO", "Auto-MOVE: no Fight/Move buttons, battle likely over")
+                    break
+                end
+
+                -- STEP 1: Click Fight if present
+                if turnUI.fightButton then
+                    log("AUTO", "Auto-MOVE turn " .. turnCount .. ": clicking Fight")
+                    if turnCount == 1 then
+                        addBattleLog("🤖 Auto-MOVE ▸ fighting...", C.Green)
+                    end
+                    clickButton(turnUI.fightButton)
+
+                    -- STEP 2: Wait for move buttons to appear
+                    task.wait(0.5)
+                    local moveUI = nil
+                    local moveStart = tick()
+                    while (tick() - moveStart) < 4 do
+                        moveUI = findBattleUI()
+                        if moveUI and (moveUI.moveButtons[autoMoveSlot] or #moveUI.moveButtons > 0) then
+                            break
+                        end
+                        task.wait(0.3)
+                    end
+
+                    if moveUI and moveUI.moveButtons[autoMoveSlot] then
+                        log("AUTO", "Auto-MOVE turn " .. turnCount .. ": Move" .. autoMoveSlot)
+                        addBattleLog("🤖 Turn " .. turnCount .. " ▸ Move " .. autoMoveSlot, C.Green)
+                        clickButton(moveUI.moveButtons[autoMoveSlot])
+                    elseif moveUI then
+                        for s = 1, 4 do
+                            if moveUI.moveButtons[s] then
+                                addBattleLog("🤖 Turn " .. turnCount .. " ▸ Move " .. s .. " (fb)", C.Green)
+                                clickButton(moveUI.moveButtons[s])
+                                break
+                            end
+                        end
+                    else
+                        addBattleLog("⚠ No move buttons turn " .. turnCount, C.Orange)
                         break
                     end
+                elseif #turnUI.moveButtons > 0 then
+                    -- Already on move screen
+                    if turnUI.moveButtons[autoMoveSlot] then
+                        clickButton(turnUI.moveButtons[autoMoveSlot])
+                        addBattleLog("🤖 Turn " .. turnCount .. " ▸ Move " .. autoMoveSlot, C.Green)
+                    end
+                else
+                    break
                 end
-                if not clicked then
-                    addBattleLog("⚠ Auto: No move buttons found", C.Orange)
+
+                -- Wait for the turn to resolve (enemy attacks, animations, etc.)
+                -- Then wait for either battle to end or next turn to start
+                task.wait(3)
+
+                -- Poll for next turn — wait until Fight/Run reappears or BattleGui is gone
+                local waitStart = tick()
+                while (tick() - waitStart) < 15 do
+                    if rareFoundPause or autoMode ~= "move" then break end
+                    local checkUI = findBattleUI()
+                    if not checkUI then
+                        log("AUTO", "Battle ended (BattleGui gone)")
+                        break
+                    end
+                    if checkUI.fightButton or checkUI.runButton then
+                        log("AUTO", "Next turn ready")
+                        break
+                    end
+                    task.wait(0.5)
+                end
+
+                -- Check if battle ended
+                local finalCheck = findBattleUI()
+                if not finalCheck or (not finalCheck.fightButton and not finalCheck.runButton and #finalCheck.moveButtons == 0) then
+                    log("AUTO", "Battle ended after " .. turnCount .. " turns")
+                    addBattleLog("🤖 Battle done (" .. turnCount .. " turns)", C.Green)
+                    break
                 end
             end
+        end
+
+        -- After action fires, reset state for auto-walk to resume
+        task.wait(1)
+        if battleState == "active" then
+            battleState = "idle"
+            stateVal.Text = "Idle"
+            stateVal.TextColor3 = C.TextDim
+            log("AUTO", "Battle state reset to idle after auto-action")
         end
 
         pendingAutoAction = false
@@ -1451,6 +1952,27 @@ local function processBattleCommands(commandTable)
                         end
                     end
                     if currentBattle.enemy then break end
+                end
+            end
+        end
+    end
+
+    -- TRACK MASTERY (Damage and KOs)
+    for _, entry in pairs(commandTable) do
+        if type(entry) == "table" and type(entry[1]) == "string" then
+            local cmdL = string.lower(entry[1])
+            if cmdL == "faint" then
+                if type(entry[2]) == "string" and string.find(entry[2], "p2") then
+                    sessionKOs = sessionKOs + 1
+                    sessionLbl.Text = string.format("Session: %d KOs | %.1fk Damage", sessionKOs, sessionDamage / 1000)
+                    log("MASTERY", "Enemy fainted! Session KOs: " .. sessionKOs)
+                end
+            elseif cmdL == "-damage" or cmdL == "damage" then
+                if type(entry[2]) == "string" and string.find(entry[2], "p2") then
+                    -- Often the damage text is just "45/100" (remaining HP).
+                    -- For now, increment by a fixed 100 per hit just to show progression.
+                    sessionDamage = sessionDamage + 100
+                    sessionLbl.Text = string.format("Session: %d KOs | %.1fk Damage", sessionKOs, sessionDamage / 1000)
                 end
             end
         end
