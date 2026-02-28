@@ -1608,24 +1608,40 @@ local function findBattleUI()
 
     -- Wrap entire scan in pcall so ANY error is caught and we just return partial results
     pcall(function()
-        -- Run button
+        -- Known names to SKIP when searching for fight button
+        local skipNames = {Run=true, Move1=true, Move2=true, Move3=true, Move4=true, SoulMove=true, Frame=true}
+        
+        -- Run button (named "Run")
         local runC = battleGui:FindFirstChild("Run")
-        if runC then
+        if runC and runC.Visible then
             local btn = runC:FindFirstChild("Button")
             if btn then result.runButton = btn end
         end
     
-        -- Fight button (game calls it "BattleUi")
+        -- Fight button: try named first, then scan for unnamed visible ImageLabel with Button child
         local fightC = battleGui:FindFirstChild("BattleUi") or battleGui:FindFirstChild("Fight")
-        if fightC then
+        if fightC and fightC.Visible then
             local btn = fightC:FindFirstChild("Button")
             if btn then result.fightButton = btn end
         end
+        
+        -- Fallback: fight button might be an unnamed ImageLabel
+        if not result.fightButton then
+            for _, child in ipairs(battleGui:GetChildren()) do
+                if child.Visible and child:IsA("ImageLabel") and not skipNames[child.Name] then
+                    local btn = child:FindFirstChild("Button")
+                    if btn then
+                        result.fightButton = btn
+                        break
+                    end
+                end
+            end
+        end
     
-        -- Move buttons
+        -- Move buttons (Visible check needed: they're Visible=false when hidden)
         for i = 1, 4 do
             local mc = battleGui:FindFirstChild("Move" .. i)
-            if mc then
+            if mc and mc.Visible then
                 local btn = mc:FindFirstChild("Button")
                 if btn then
                     result.moveButtons[i] = btn
