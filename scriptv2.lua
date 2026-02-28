@@ -12,6 +12,45 @@ local StarterGui = game:GetService("StarterGui")
 local SoundService = game:GetService("SoundService")
 local UserInputService = game:GetService("UserInputService")
 local HttpService = game:GetService("HttpService")
+
+local VERSION = "v4.5"
+
+--------------------------------------------------
+-- CONFIGURATION SYSTEM
+--------------------------------------------------
+local configName = "LumiWare_v45_Config.json"
+local defaultConfig = {
+    webhookUrl = "",
+    useAutoPing = false,
+    pingIds = "",
+    autoMode = "off",
+    autoMoveSlot = 1,
+    autoWalk = false,
+    discoveryMode = false,
+    customRares = {}
+}
+
+local config = defaultConfig
+if isfile and readfile and writefile then
+    pcall(function()
+        if isfile(configName) then
+            local decoded = HttpService:JSONDecode(readfile(configName))
+            for k, v in pairs(decoded) do
+                config[k] = v
+            end
+        else
+            writefile(configName, HttpService:JSONEncode(defaultConfig))
+        end
+    end)
+end
+
+local function saveConfig()
+    if writefile then
+        pcall(function()
+            writefile(configName, HttpService:JSONEncode(config))
+        end)
+    end
+end
 local VirtualInputManager = game:GetService("VirtualInputManager")
 
 local player = Players.LocalPlayer
@@ -42,7 +81,7 @@ local RARE_LOOMIANS = {
     "Vambat", "Weevolt", "Nevermare", "Ikazune", "Protogon", "Mimask", "Odoyaga", "Yari",
     "Akhalos", "Odasho", "Cosmiore", "Dakuda", "Shawchi", "Arceros", "Galacadia"
 }
-local customRares = {}
+local customRares = config.customRares
 
 -- LAYER 1: Name-based rare modifier detection
 -- Catches: "Gleam Dripple", "Gamma Grubby", "SA Dripple", etc.
@@ -453,8 +492,62 @@ local function tablePreview(tbl, depth)
 end
 
 --------------------------------------------------
--- GUI CLEANUP
+-- FULL CLEANUP (handles re-execution)
 --------------------------------------------------
+-- Kill previous instance entirely if it exists
+if _G.LumiWare_Cleanup then
+    pcall(_G.LumiWare_Cleanup)
+end
+
+-- Connection tracker: all :Connect() calls get registered here for cleanup
+local allConnections = {}
+local function track(connection)
+    table.insert(allConnections, connection)
+    return connection
+end
+
+-- Cleanup function for THIS instance (called by next re-execution)
+_G.LumiWare_Cleanup = function()
+    -- Disconnect ALL event connections
+    for _, conn in ipairs(allConnections) do
+        pcall(function() conn:Disconnect() end)
+    end
+    allConnections = {}
+    
+    -- Stop autowalk thread
+    pcall(function()
+        if _G.LumiWare_WalkThread then
+            task.cancel(_G.LumiWare_WalkThread)
+            _G.LumiWare_WalkThread = nil
+        end
+    end)
+    
+    -- Stop any pending auto-action
+    pcall(function()
+        if _G.LumiWare_StopFlag then
+            _G.LumiWare_StopFlag = true
+        end
+    end)
+    
+    -- Destroy all GUIs
+    pcall(function()
+        for _, v in pairs(player:WaitForChild("PlayerGui"):GetChildren()) do
+            if string.find(v.Name, "LumiWare_Hub") or v.Name == "BattleLoomianViewer" then v:Destroy() end
+        end
+    end)
+    pcall(function()
+        for _, v in pairs(CoreGui:GetChildren()) do
+            if string.find(v.Name, "LumiWare_Hub") or v.Name == "BattleLoomianViewer" then v:Destroy() end
+        end
+    end)
+    
+    -- Release shift key
+    pcall(function()
+        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.LeftShift, false, game)
+    end)
+end
+
+-- Also do immediate GUI cleanup for any orphaned instances
 local guiName = "LumiWare_Hub_" .. tostring(math.random(1000, 9999))
 for _, v in pairs(player:WaitForChild("PlayerGui"):GetChildren()) do
     if string.find(v.Name, "LumiWare_Hub") or v.Name == "BattleLoomianViewer" then v:Destroy() end
@@ -465,6 +558,9 @@ pcall(function()
     end
 end)
 
+-- Stop flag for loops to check
+_G.LumiWare_StopFlag = false
+
 local gui = Instance.new("ScreenGui")
 gui.Name = guiName
 gui.ResetOnSpawn = false
@@ -473,18 +569,45 @@ local ok = pcall(function() gui.Parent = CoreGui end)
 if not ok then gui.Parent = player:WaitForChild("PlayerGui") end
 
 --------------------------------------------------
--- THEME
+-- THEME (V4.5 Premium Dark Mode)
 --------------------------------------------------
 local C = {
-    BG = Color3.fromRGB(16, 16, 22), TopBar = Color3.fromRGB(24, 24, 34),
-    Accent = Color3.fromRGB(120, 80, 255), AccentDim = Color3.fromRGB(80, 50, 180),
-    Text = Color3.fromRGB(240, 240, 245), TextDim = Color3.fromRGB(160, 160, 175),
-    Panel = Color3.fromRGB(22, 22, 30), PanelAlt = Color3.fromRGB(28, 28, 38),
-    Gold = Color3.fromRGB(255, 215, 0), Green = Color3.fromRGB(80, 220, 120),
-    Red = Color3.fromRGB(255, 80, 80), Wild = Color3.fromRGB(80, 200, 255),
-    Trainer = Color3.fromRGB(255, 160, 60), Orange = Color3.fromRGB(255, 160, 60),
-    Cyan = Color3.fromRGB(80, 200, 255),
+    BG = Color3.fromRGB(13, 13, 18), TopBar = Color3.fromRGB(20, 20, 28),
+    Accent = Color3.fromRGB(110, 80, 255), AccentDim = Color3.fromRGB(75, 55, 180),
+    Text = Color3.fromRGB(245, 245, 250), TextDim = Color3.fromRGB(150, 150, 165),
+    Panel = Color3.fromRGB(20, 20, 26), PanelAlt = Color3.fromRGB(26, 26, 34),
+    Gold = Color3.fromRGB(255, 210, 50), Green = Color3.fromRGB(60, 215, 120),
+    Red = Color3.fromRGB(255, 75, 90), Wild = Color3.fromRGB(70, 190, 255),
+    Trainer = Color3.fromRGB(255, 150, 60), Orange = Color3.fromRGB(255, 150, 60),
+    Cyan = Color3.fromRGB(70, 190, 255),
 }
+
+-- UI Helper: Create Drop Shadow
+local function createShadow(parent, radius, offset)
+    local shadow = Instance.new("ImageLabel", parent)
+    shadow.Name = "Shadow"
+    shadow.BackgroundTransparency = 1
+    shadow.Image = "rbxassetid://1316045217"
+    shadow.ImageColor3 = Color3.new(0, 0, 0)
+    shadow.ImageTransparency = 0.5
+    shadow.ScaleType = Enum.ScaleType.Slice
+    shadow.SliceCenter = Rect.new(10, 10, 118, 118)
+    shadow.Position = UDim2.new(0, -radius + offset.X, 0, -radius + offset.Y)
+    shadow.Size = UDim2.new(1, radius * 2, 1, radius * 2)
+    shadow.ZIndex = parent.ZIndex - 1
+    return shadow
+end
+
+-- UI Helper: Add Hover Animation
+local function addHoverEffect(button, defaultColor, hoverColor)
+    local tInfo = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+    button.MouseEnter:Connect(function()
+        TweenService:Create(button, tInfo, {BackgroundColor3 = hoverColor}):Play()
+    end)
+    button.MouseLeave:Connect(function()
+        TweenService:Create(button, tInfo, {BackgroundColor3 = defaultColor}):Play()
+    end)
+end
 
 --------------------------------------------------
 -- MAIN FRAME
@@ -495,13 +618,71 @@ mainFrame.Position = UDim2.fromScale(0.5, 0.5)
 mainFrame.AnchorPoint = Vector2.new(0.5, 0.5)
 mainFrame.BackgroundColor3 = C.BG
 mainFrame.BorderSizePixel = 0
-mainFrame.ClipsDescendants = true
+mainFrame.ClipsDescendants = false -- Needed for shadow
 mainFrame.Parent = gui
-Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 10)
+mainFrame.GroupTransparency = 1 -- Start transparent for intro
+local mainScale = Instance.new("UIScale", mainFrame)
+mainScale.Scale = 0.9 -- Start slightly small for pop-in effect
+
+Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 12)
+createShadow(mainFrame, 15, Vector2.new(0, 4))
 local stroke = Instance.new("UIStroke", mainFrame)
 stroke.Color = C.Accent
 stroke.Thickness = 1.5
-stroke.Transparency = 0.4
+stroke.Transparency = 0.5
+
+-- UIGradient for premium background
+local bgGrad = Instance.new("UIGradient", mainFrame)
+bgGrad.Color = ColorSequence.new{
+    ColorSequenceKeypoint.new(0, Color3.new(1, 1, 1)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(200, 200, 220))
+}
+bgGrad.Rotation = 45
+
+--------------------------------------------------
+-- V4.5 INTRO ANIMATION (Splash Screen)
+--------------------------------------------------
+local splashFrame = Instance.new("Frame", mainFrame)
+splashFrame.Size = UDim2.fromScale(1, 1)
+splashFrame.BackgroundTransparency = 0
+splashFrame.BackgroundColor3 = C.BG
+splashFrame.ZIndex = 100
+Instance.new("UICorner", splashFrame).CornerRadius = UDim.new(0, 12)
+local splashGrad = Instance.new("UIGradient", splashFrame)
+splashGrad.Color = ColorSequence.new{
+    ColorSequenceKeypoint.new(0, C.AccentDim),
+    ColorSequenceKeypoint.new(1, C.BG)
+}
+splashGrad.Rotation = 90
+
+local splashLogo = Instance.new("TextLabel", splashFrame)
+splashLogo.Size = UDim2.fromScale(1, 1)
+splashLogo.BackgroundTransparency = 1
+splashLogo.Text = "⚡ LumiWare " .. VERSION
+splashLogo.Font = Enum.Font.GothamBlack
+splashLogo.TextSize = 34
+splashLogo.TextColor3 = C.Text
+splashLogo.ZIndex = 101
+
+local splashUIScale = Instance.new("UIScale", splashLogo)
+splashUIScale.Scale = 0.8
+
+-- Start Intro Sequence
+task.spawn(function()
+    -- Fade in whole UI skeleton
+    TweenService:Create(mainFrame, TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {GroupTransparency = 0}):Play()
+    -- Scale up logo
+    TweenService:Create(splashUIScale, TweenInfo.new(1.2, Enum.EasingStyle.Exponential, Enum.EasingDirection.Out), {Scale = 1.05}):Play()
+    task.wait(1.5)
+    
+    -- Fade out splash while popping main frame up
+    TweenService:Create(splashFrame, TweenInfo.new(0.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {BackgroundTransparency = 1}):Play()
+    TweenService:Create(splashLogo, TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {TextTransparency = 1}):Play()
+    TweenService:Create(mainScale, TweenInfo.new(0.6, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Scale = 1}):Play()
+    
+    task.wait(0.6)
+    splashFrame:Destroy()
+end)
 
 -- TOPBAR
 local topbar = Instance.new("Frame", mainFrame)
@@ -528,24 +709,26 @@ titleLbl.TextXAlignment = Enum.TextXAlignment.Left
 local minBtn = Instance.new("TextButton", topbar)
 minBtn.Size = UDim2.fromOffset(28, 28)
 minBtn.Position = UDim2.new(1, -66, 0, 4)
-minBtn.BackgroundColor3 = C.AccentDim
+minBtn.BackgroundColor3 = C.PanelAlt
 minBtn.Text = "–"
 minBtn.Font = Enum.Font.GothamBold
 minBtn.TextSize = 18
 minBtn.TextColor3 = C.Text
 minBtn.BorderSizePixel = 0
 Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0, 6)
+addHoverEffect(minBtn, C.PanelAlt, C.AccentDim)
 
 local closeBtn = Instance.new("TextButton", topbar)
 closeBtn.Size = UDim2.fromOffset(28, 28)
 closeBtn.Position = UDim2.new(1, -34, 0, 4)
-closeBtn.BackgroundColor3 = C.Red
+closeBtn.BackgroundColor3 = C.PanelAlt
 closeBtn.Text = "×"
 closeBtn.Font = Enum.Font.GothamBold
 closeBtn.TextSize = 18
 closeBtn.TextColor3 = C.Text
 closeBtn.BorderSizePixel = 0
 Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 6)
+addHoverEffect(closeBtn, C.PanelAlt, C.Red)
 
 closeBtn.MouseButton1Click:Connect(function()
     local elapsed = tick() - huntStartTime
@@ -564,12 +747,12 @@ end)
 topbar.InputChanged:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then dragInput = input end
 end)
-UserInputService.InputChanged:Connect(function(input)
+track(UserInputService.InputChanged:Connect(function(input)
     if input == dragInput and dragging then
         local d = input.Position - dragStart
         mainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
     end
-end)
+end))
 
 -- TAB SELECTION UI
 local tabBar = Instance.new("Frame", mainFrame)
@@ -598,6 +781,17 @@ masteryTabBtn.TextSize = 13
 masteryTabBtn.TextColor3 = C.TextDim
 masteryTabBtn.BorderSizePixel = 0
 Instance.new("UICorner", masteryTabBtn).CornerRadius = UDim.new(0, 6)
+
+-- Tab hover logic is slightly different since the active tab stays Accent color
+local function updateTabVisuals(activeStr)
+    if activeStr == "hunt" then
+        TweenService:Create(huntTabBtn, TweenInfo.new(0.2), {BackgroundColor3 = C.Accent, TextColor3 = C.Text}):Play()
+        TweenService:Create(masteryTabBtn, TweenInfo.new(0.2), {BackgroundColor3 = C.PanelAlt, TextColor3 = C.TextDim}):Play()
+    else
+        TweenService:Create(masteryTabBtn, TweenInfo.new(0.2), {BackgroundColor3 = C.Accent, TextColor3 = C.Text}):Play()
+        TweenService:Create(huntTabBtn, TweenInfo.new(0.2), {BackgroundColor3 = C.PanelAlt, TextColor3 = C.TextDim}):Play()
+    end
+end
 
 -- CONTENT WRAPPER
 local contentContainer = Instance.new("Frame", mainFrame)
@@ -1086,6 +1280,10 @@ local offBtn = mkAutoBtn(autoPanel, "OFF", 56, 26, 50)
 local moveBtn = mkAutoBtn(autoPanel, "MOVE", 112, 26, 60)
 local runBtn = mkAutoBtn(autoPanel, "RUN", 178, 26, 50)
 
+addHoverEffect(offBtn, C.AccentDim, C.Red)
+addHoverEffect(moveBtn, C.AccentDim, C.Green)
+addHoverEffect(runBtn, C.AccentDim, C.Cyan)
+
 -- Move slot label + textbox
 local slotLabel = Instance.new("TextLabel", autoPanel)
 slotLabel.Size = UDim2.new(0, 70, 0, 22)
@@ -1120,7 +1318,8 @@ end
 -- Auto-walk toggle
 local walkBtn = mkAutoBtn(autoPanel, "🚶 AUTO-WALK: OFF", 8, 78, 140)
 local scanBtn = mkAutoBtn(autoPanel, "🔍 SCAN UI", 155, 78, 80)
-scanBtn.BackgroundColor3 = C.Orange
+scanBtn.BackgroundColor3 = C.PanelAlt
+addHoverEffect(scanBtn, C.PanelAlt, C.Accent)
 
 -- Status label
 local autoStatusLbl = Instance.new("TextLabel", autoPanel)
@@ -1142,7 +1341,7 @@ local function updateAutoUI()
     end
     slotLabel.TextColor3 = autoMode == "move" and C.Text or C.TextDim
     slotInput.Text = tostring(autoMoveSlot)
-    walkBtn.BackgroundColor3 = autoWalkEnabled and C.Green or C.AccentDim
+    walkBtn.BackgroundColor3 = autoWalkEnabled and C.Green or C.PanelAlt
     walkBtn.Text = autoWalkEnabled and "🚶 WALKING" or "🚶 AUTO-WALK"
     -- Status text
     if autoMode == "off" then
@@ -1156,18 +1355,24 @@ end
 
 offBtn.MouseButton1Click:Connect(function()
     autoMode = "off"
+    config.autoMode = autoMode
+    saveConfig()
     rareFoundPause = false
     updateAutoUI()
     sendNotification("LumiWare", "Automation OFF", 3)
 end)
 moveBtn.MouseButton1Click:Connect(function()
     autoMode = "move"
+    config.autoMode = autoMode
+    saveConfig()
     rareFoundPause = false
     updateAutoUI()
     sendNotification("LumiWare", "Auto-MOVE slot " .. autoMoveSlot, 3)
 end)
 runBtn.MouseButton1Click:Connect(function()
     autoMode = "run"
+    config.autoMode = autoMode
+    saveConfig()
     rareFoundPause = false
     updateAutoUI()
     sendNotification("LumiWare", "Auto-RUN enabled", 3)
@@ -1175,14 +1380,19 @@ end)
 for s = 1, 4 do
     slotBtns[s].MouseButton1Click:Connect(function()
         autoMoveSlot = s
+        config.autoMoveSlot = s
+        saveConfig()
         updateAutoUI()
     end)
+    addHoverEffect(slotBtns[s], C.PanelAlt, C.AccentDim)
 end
 
 slotInput.FocusLost:Connect(function()
     local num = tonumber(slotInput.Text)
     if num and num >= 1 and num <= 4 then
         autoMoveSlot = math.floor(num)
+        config.autoMoveSlot = autoMoveSlot
+        saveConfig()
     end
     updateAutoUI()
 end)
@@ -1226,6 +1436,7 @@ scanBtn.MouseButton1Click:Connect(function()
     addBattleLog("🔍 Scan: " .. btnCount .. " buttons (check F9 console)", C.Orange)
     sendNotification("LumiWare", "Scan: " .. btnCount .. " buttons found.\nCheck F9 console for full paths.", 5)
 end)
+addHoverEffect(scanBtn, C.AccentDim, C.Accent)
 
 -- OUTGOING REMOTE SPY: hook FireServer to see what client sends
 pcall(function()
@@ -1426,19 +1637,20 @@ end)
 local function startAutoWalk()
     if autoWalkThread then return end
     autoWalkThread = task.spawn(function()
+        _G.LumiWare_WalkThread = autoWalkThread
         log("INFO", "Auto-walk started")
         local char = player.Character or player.CharacterAdded:Wait()
         local humanoid = char:WaitForChild("Humanoid")
         local rootPart = char:WaitForChild("HumanoidRootPart")
         local center = rootPart.Position
         local radius = 6
-        local numPoints = 6
+        local numPoints = 12
         local pointIndex = 0
+        local heartbeat = game:GetService("RunService").Heartbeat
 
         while autoWalkEnabled and gui.Parent do
             -- Pause during battles
             if battleState == "active" then
-                -- Release shift while in battle
                 pcall(function()
                     VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.LeftShift, false, game)
                     VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.LeftShift, false, game)
@@ -1466,18 +1678,15 @@ local function startAutoWalk()
 
                         humanoid:MoveTo(targetPos)
 
-                        -- Wait for move to complete or timeout
+                        -- Continuously poll until close to target, then immediately move to next
+                        -- No waiting for MoveToFinished = no stopping between waypoints
                         local moveStart = tick()
-                        local reached = false
-                        local conn
-                        conn = humanoid.MoveToFinished:Connect(function()
-                            reached = true
-                        end)
-                        while not reached and (tick() - moveStart) < 2 and autoWalkEnabled do
-                            task.wait(0.1)
+                        while autoWalkEnabled and (tick() - moveStart) < 2 do
+                            heartbeat:Wait()
+                            if not rootPart or not rootPart.Parent then break end
+                            local dist = (rootPart.Position - targetPos).Magnitude
+                            if dist < 2 then break end -- close enough, move to next point immediately
                         end
-                        if conn then conn:Disconnect() end
-                        task.wait(0.05)
                     end
                 end
             end
@@ -1512,6 +1721,8 @@ end
 
 walkBtn.MouseButton1Click:Connect(function()
     autoWalkEnabled = not autoWalkEnabled
+    config.autoWalk = autoWalkEnabled
+    saveConfig()
     updateAutoUI()
     if autoWalkEnabled then
         startAutoWalk()
@@ -1523,6 +1734,7 @@ walkBtn.MouseButton1Click:Connect(function()
         addBattleLog("🚶 Auto-walk OFF", C.TextDim)
     end
 end)
+addHoverEffect(walkBtn, C.AccentDim, C.Accent)
 
 --------------------------------------------------
 -- AUTO-BATTLE: Find & Click Game UI Buttons
@@ -2288,7 +2500,7 @@ local function hookEvent(remote)
     hooked[remote] = true
     hookedCount = hookedCount + 1
 
-    remote.OnClientEvent:Connect(function(...)
+    track(remote.OnClientEvent:Connect(function(...)
         -- ============================================
         -- STEP 0: Capture ALL args into a table IMMEDIATELY
         -- Do not rely on ... after this point.
@@ -2412,7 +2624,7 @@ local function hookEvent(remote)
         elseif isBattle then
             logDebug("BattleEvent no cmd table, arg3=" .. tostring(allArgs[3]))
         end
-    end)
+    end))
 end
 
 -- Hook all
@@ -2423,9 +2635,9 @@ for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do
 end
 log("HOOK", "Hooked", c, "from ReplicatedStorage")
 
-ReplicatedStorage.DescendantAdded:Connect(function(obj)
+track(ReplicatedStorage.DescendantAdded:Connect(function(obj)
     if obj:IsA("RemoteEvent") then hookEvent(obj) end
-end)
+end))
 
 pcall(function()
     for _, obj in ipairs(game:GetService("Workspace"):GetDescendants()) do
@@ -2439,5 +2651,5 @@ pcall(function()
 end)
 
 addBattleLog("Hooked " .. hookedCount .. " remotes — READY", C.Green)
-log("INFO", "LumiWare v4 READY | Hooked " .. hookedCount .. " | Player: " .. PLAYER_NAME)
-sendNotification("⚡ LumiWare v4", "Hooked " .. hookedCount .. " remotes.\nBattle detection + automation ready.", 6)
+log("INFO", "LumiWare " .. VERSION .. " READY | Hooked " .. hookedCount .. " | Player: " .. PLAYER_NAME)
+sendNotification("⚡ LumiWare " .. VERSION, "Hooked " .. hookedCount .. " remotes.\nBattle detection + automation ready.", 6)
