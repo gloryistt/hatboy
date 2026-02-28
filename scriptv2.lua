@@ -36,11 +36,11 @@ log("INFO", "Initializing LumiWare v4 for:", PLAYER_NAME)
 -- RARE LOOMIANS
 --------------------------------------------------
 local RARE_LOOMIANS = {
-    "Duskit", "Ikazune", "Mutagon", "Protogon", "Metronette", "Wabalisc",
+     "Duskit", "Ikazune", "Mutagon", "Metronette", "Wabalisc",
     "Cephalops", "Elephage", "Gargolem", "Celesting", "Nyxre", "Pyramind",
-    "Terracolt", "Garbantis", "Cynamoth", "Avitross", "Snocub", "Eaglit",
-    "Vambat", "Weevolt", "Nevermare",
-    "Akhalos", "Odasho", "Cosmiore", "Armenti", "Shawchi"
+    "Terracolt", "Garbantis", "Avitross", "Snocub", "Eaglit", "Grimyuline",
+    "Vambat", "Weevolt", "Nevermare", "Ikazune", "Protogon", "Mimask", "Odoyaga", "Yari",
+    "Akhalos", "Odasho", "Cosmiore", "Dakuda", "Shawchi", "Arceros", "Galacadia"
 }
 local customRares = {}
 
