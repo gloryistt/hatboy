@@ -1521,6 +1521,7 @@ local function findBattleUI()
         runButton = nil,
         fightButton = nil,
         moveButtons = {},
+        moveNames = {},
     }
 
     -- METHOD 1: Direct path (fastest)
@@ -1612,6 +1613,15 @@ local function findBattleUI()
             local moveBtn = moveContainer:FindFirstChild("Button")
             if moveBtn and isVisible(moveBtn) then
                 result.moveButtons[i] = moveBtn
+                
+                -- Try to find the TextLabel containing the move's name
+                local txt = moveContainer:FindFirstChildOfClass("TextLabel")
+                if not txt and moveBtn then
+                    txt = moveBtn:FindFirstChildOfClass("TextLabel")
+                end
+                if txt and txt.Text then
+                    result.moveNames[i] = txt.Text:lower()
+                end
             end
         end
     end
@@ -1735,29 +1745,52 @@ local function performAutoAction()
                     end
                     clickButton(turnUI.fightButton)
 
-                    -- STEP 2: Wait for move buttons to appear
-                    task.wait(0.5)
+                    -- STEP 2: Wait for move buttons to appear (and Fight button to vanish)
                     local moveUI = nil
                     local moveStart = tick()
-                    while (tick() - moveStart) < 4 do
+                    while (tick() - moveStart) < 5 do
+                        task.wait(0.2)
                         moveUI = findBattleUI()
-                        -- Explicitly wait for the UI to exist *and* have moves
-                        if moveUI and (#moveUI.moveButtons > 0) then
+                        -- Explicitly wait for the Fight button to disappear AND moves to appear
+                        if moveUI and not moveUI.fightButton and (#moveUI.moveButtons > 0) then
+                            -- Small extra delay for the slide-in animation to finish
+                            task.wait(0.4)
+                            moveUI = findBattleUI() -- refresh one last time
                             break
                         end
-                        task.wait(0.3)
                     end
 
-                    if moveUI and moveUI.moveButtons[autoMoveSlot] then
-                        log("AUTO", "Auto-MOVE turn " .. turnCount .. ": Move" .. autoMoveSlot)
-                        addBattleLog("🤖 Turn " .. turnCount .. " ▸ Move " .. autoMoveSlot, C.Green)
-                        clickButton(moveUI.moveButtons[autoMoveSlot])
-                    elseif moveUI then
-                        for s = 1, 4 do
-                            if moveUI.moveButtons[s] then
-                                addBattleLog("🤖 Turn " .. turnCount .. " ▸ Move " .. s .. " (fb)", C.Green)
-                                clickButton(moveUI.moveButtons[s])
-                                break
+                    if moveUI and (#moveUI.moveButtons > 0) then
+                        local targetSlot = autoMoveSlot
+                        
+                        -- If the user typed a string instead of a number, try to map it to a slot
+                        if type(autoMoveSlot) == "string" and not tonumber(autoMoveSlot) then
+                            local searchName = string.lower(autoMoveSlot)
+                            for s = 1, 4 do
+                                if moveUI.moveNames[s] and string.find(moveUI.moveNames[s], searchName) then
+                                    targetSlot = s
+                                    break
+                                end
+                            end
+                            -- Fallback to slot 1 if the name wasn't found
+                            if type(targetSlot) == "string" then targetSlot = 1 end
+                        else
+                            targetSlot = tonumber(autoMoveSlot) or 1
+                        end
+                        
+                        targetSlot = math.clamp(targetSlot, 1, 4)
+
+                        if moveUI.moveButtons[targetSlot] then
+                            log("AUTO", "Auto-MOVE turn " .. turnCount .. ": Move" .. targetSlot)
+                            addBattleLog("🤖 Turn " .. turnCount .. " ▸ Move " .. targetSlot, C.Green)
+                            clickButton(moveUI.moveButtons[targetSlot])
+                        else
+                            for s = 1, 4 do
+                                if moveUI.moveButtons[s] then
+                                    addBattleLog("🤖 Turn " .. turnCount .. " ▸ Move " .. s .. " (fb)", C.Green)
+                                    clickButton(moveUI.moveButtons[s])
+                                    break
+                                end
                             end
                         end
                     else
@@ -1766,9 +1799,32 @@ local function performAutoAction()
                     end
                 elseif #turnUI.moveButtons > 0 then
                     -- Already on move screen
-                    if turnUI.moveButtons[autoMoveSlot] then
-                        clickButton(turnUI.moveButtons[autoMoveSlot])
-                        addBattleLog("🤖 Turn " .. turnCount .. " ▸ Move " .. autoMoveSlot, C.Green)
+                    local targetSlot = autoMoveSlot
+                    if type(autoMoveSlot) == "string" and not tonumber(autoMoveSlot) then
+                        local searchName = string.lower(autoMoveSlot)
+                        for s = 1, 4 do
+                            if turnUI.moveNames[s] and string.find(turnUI.moveNames[s], searchName) then
+                                targetSlot = s
+                                break
+                            end
+                        end
+                        if type(targetSlot) == "string" then targetSlot = 1 end
+                    else
+                        targetSlot = tonumber(autoMoveSlot) or 1
+                    end
+                    targetSlot = math.clamp(targetSlot, 1, 4)
+
+                    if turnUI.moveButtons[targetSlot] then
+                        clickButton(turnUI.moveButtons[targetSlot])
+                        addBattleLog("🤖 Turn " .. turnCount .. " ▸ Move " .. targetSlot, C.Green)
+                    else
+                        for s = 1, 4 do
+                            if turnUI.moveButtons[s] then
+                                clickButton(turnUI.moveButtons[s])
+                                addBattleLog("🤖 Turn " .. turnCount .. " ▸ Move " .. s .. " (fb)", C.Green)
+                                break
+                            end
+                        end
                     end
                 else
                     break
