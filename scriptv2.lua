@@ -514,7 +514,17 @@ _G.LumiWare_Cleanup = function()
     end
     allConnections = {}
     
-    -- Stop autowalk thread
+    -- Stop all registered threads
+    pcall(function()
+        if _G.LumiWare_Threads then
+            for _, th in ipairs(_G.LumiWare_Threads) do
+                task.cancel(th)
+            end
+            _G.LumiWare_Threads = {}
+        end
+    end)
+    
+    -- Stop autowalk thread (legacy fallback)
     pcall(function()
         if _G.LumiWare_WalkThread then
             task.cancel(_G.LumiWare_WalkThread)
@@ -541,6 +551,11 @@ _G.LumiWare_Cleanup = function()
         end
     end)
     
+    -- Cleanup global hooks specifically
+    pcall(function()
+        if _G.LumiWare_OldNamecall then _G.LumiWare_OldNamecall = nil end
+    end)
+    
     -- Release shift key
     pcall(function()
         VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.LeftShift, false, game)
@@ -560,6 +575,7 @@ end)
 
 -- Stop flag for loops to check
 _G.LumiWare_StopFlag = false
+_G.LumiWare_Threads = {}
 
 local gui = Instance.new("ScreenGui")
 gui.Name = guiName
@@ -601,18 +617,18 @@ end
 -- UI Helper: Add Hover Animation
 local function addHoverEffect(button, defaultColor, hoverColor)
     local tInfo = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-    button.MouseEnter:Connect(function()
+    track(button.MouseEnter:Connect(function()
         TweenService:Create(button, tInfo, {BackgroundColor3 = hoverColor}):Play()
-    end)
-    button.MouseLeave:Connect(function()
+    end))
+    track(button.MouseLeave:Connect(function()
         TweenService:Create(button, tInfo, {BackgroundColor3 = defaultColor}):Play()
-    end)
+    end))
 end
 
 --------------------------------------------------
 -- MAIN FRAME
 --------------------------------------------------
-local mainFrame = Instance.new("Frame")
+local mainFrame = Instance.new("CanvasGroup")
 mainFrame.Size = UDim2.fromOffset(460, 720)
 mainFrame.Position = UDim2.fromScale(0.5, 0.5)
 mainFrame.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -738,15 +754,15 @@ end)
 
 -- Drag
 local dragging, dragInput, dragStart, startPos
-topbar.InputBegan:Connect(function(input)
+track(topbar.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
         dragging = true; dragStart = input.Position; startPos = mainFrame.Position
-        input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then dragging = false end end)
+        track(input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then dragging = false end end))
     end
-end)
-topbar.InputChanged:Connect(function(input)
+end))
+track(topbar.InputChanged:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then dragInput = input end
-end)
+end))
 track(UserInputService.InputChanged:Connect(function(input)
     if input == dragInput and dragging then
         local d = input.Position - dragStart
@@ -1561,7 +1577,7 @@ local resetBtn = mkBtn(ctrlPanel, "🔄 RESET")
 local discoveryBtn = mkBtn(ctrlPanel, "🔍 DISCOVERY")
 local verboseBtn = mkBtn(ctrlPanel, "📝 VERBOSE")
 
-resetBtn.MouseButton1Click:Connect(function()
+track(resetBtn.MouseButton1Click:Connect(function()
     encounterCount = 0; huntStartTime = tick(); raresFoundCount = 0
     encounterHistory = {}; currentEnemy = nil; resetBattle()
     encounterVal.Text = "0"; epmVal.Text = "0.0"; timerVal.Text = "0m 00s"
@@ -1570,22 +1586,22 @@ resetBtn.MouseButton1Click:Connect(function()
     enemyLbl.Text = "Enemy: Waiting for battle..."
     enemyStatsLbl.Text = ""; playerLbl.Text = "Your Loomian: —"
     addBattleLog("Session reset", C.Accent)
-end)
-discoveryBtn.MouseButton1Click:Connect(function()
+end))
+track(discoveryBtn.MouseButton1Click:Connect(function()
     discoveryMode = not discoveryMode
     discoveryBtn.BackgroundColor3 = discoveryMode and C.Orange or C.AccentDim
     discoveryBtn.Text = discoveryMode and "🔍 DISC: ON" or "🔍 DISCOVERY"
     addBattleLog("Discovery: " .. tostring(discoveryMode), C.Orange)
-end)
-verboseBtn.MouseButton1Click:Connect(function()
+end))
+track(verboseBtn.MouseButton1Click:Connect(function()
     VERBOSE_MODE = not VERBOSE_MODE
     verboseBtn.BackgroundColor3 = VERBOSE_MODE and C.Orange or C.AccentDim
     verboseBtn.Text = VERBOSE_MODE and "📝 VERB: ON" or "📝 VERBOSE"
-end)
+end))
 
 -- MINIMIZE
 local fullSize = UDim2.fromOffset(460, 720)
-minBtn.MouseButton1Click:Connect(function()
+track(minBtn.MouseButton1Click:Connect(function()
     isMinimized = not isMinimized
     if isMinimized then
         TweenService:Create(mainFrame, TweenInfo.new(0.25, Enum.EasingStyle.Quint), { Size = UDim2.fromOffset(460, 36) }):Play()
@@ -1595,11 +1611,12 @@ minBtn.MouseButton1Click:Connect(function()
         TweenService:Create(mainFrame, TweenInfo.new(0.25, Enum.EasingStyle.Quint), { Size = fullSize }):Play()
         minBtn.Text = "–"
     end
-end)
+end))
 
 -- TIMER
-task.spawn(function()
-    while gui.Parent do
+local timerThread = task.spawn(function()
+    while not _G.LumiWare_StopFlag do
+        if not gui.Parent then break end
         local elapsed = tick() - huntStartTime
         timerVal.Text = formatTime(elapsed)
         local minutes = elapsed / 60
@@ -1619,10 +1636,13 @@ task.spawn(function()
         task.wait(1)
     end
 end)
+if _G.LumiWare_Threads then table.insert(_G.LumiWare_Threads, timerThread) end
+
 -- SESSION WEBHOOK
-task.spawn(function()
+local webhookThread = task.spawn(function()
     local lastMs = 0
-    while gui.Parent do
+    while not _G.LumiWare_StopFlag do
+        if not gui.Parent then break end
         if encounterCount > 0 and encounterCount % 50 == 0 and encounterCount ~= lastMs then
             lastMs = encounterCount
             sendSessionWebhook(encounterCount, formatTime(tick() - huntStartTime), raresFoundCount)
@@ -1630,6 +1650,7 @@ task.spawn(function()
         task.wait(5)
     end
 end)
+if _G.LumiWare_Threads then table.insert(_G.LumiWare_Threads, webhookThread) end
 
 --------------------------------------------------
 -- AUTO-WALK: Circle Movement
