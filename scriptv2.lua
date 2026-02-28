@@ -1729,7 +1729,7 @@ local function performAutoAction()
                     if rareFoundPause or autoMode ~= "move" then break end
                     turnUI = findBattleUI()
                     if turnUI and (turnUI.fightButton or #turnUI.moveButtons > 0) then break end
-                    task.wait(0.5)
+                    task.wait(0.1)
                 end
 
                 if not turnUI or (not turnUI.fightButton and #turnUI.moveButtons == 0) then
@@ -1836,27 +1836,40 @@ local function performAutoAction()
                     if not vUI or (#vUI.moveButtons == 0 and not vUI.fightButton) then
                         break
                     end
-                    task.wait(0.2)
+                    task.wait(0.1)
                 end
 
                 -- Now wait for the animations to finish and the next turn to start
                 local waitStart = tick()
+                local battleEnded = false
                 while (tick() - waitStart) < 30 do -- Increased timeout for long attack animations
                     if rareFoundPause or autoMode ~= "move" then break end
                     local checkUI = findBattleUI()
                     if checkUI and (checkUI.fightButton or checkUI.runButton) then
                         log("AUTO", "Next turn ready")
                         break
+                    elseif not checkUI and (tick() - waitStart) > 5 then
+                        -- Check if we're actually back in the overworld (battle over)
+                        if player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+                            -- Simple heuristic: if we've been waiting 5+ seconds without UI, and we have our character, battle is probably over
+                            -- We will let the main loop re-verify
+                        end
                     end
-                    task.wait(1)
+                    task.wait(0.2)
                 end
 
                 -- Check if battle ended
                 local finalCheck = findBattleUI()
-                if not finalCheck or (not finalCheck.fightButton and not finalCheck.runButton and #finalCheck.moveButtons == 0) then
-                    log("AUTO", "Battle ended after " .. turnCount .. " turns")
+                if not finalCheck and (tick() - waitStart) >= 30 then
+                    -- If we strictly timed out after 30 seconds with NO UI, it's safe to assume battle is over 
+                    -- (or the game broke, in which case we should abort anyway)
+                    log("AUTO", "Battle ended after " .. turnCount .. " turns (timeout)")
                     addBattleLog("🤖 Battle done (" .. turnCount .. " turns)", C.Green)
                     break
+                elseif finalCheck and not finalCheck.fightButton and not finalCheck.runButton and #finalCheck.moveButtons == 0 then
+                    -- We see the UI, but it has no buttons. It might just be an animation still, so we DON'T break
+                    -- It will loop back up to turnCount + 1 and hit the 10-second turn check wait.
+                    log("AUTO", "Turn " .. turnCount .. " ended, looping to next")
                 end
             end
         end
