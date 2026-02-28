@@ -1601,8 +1601,9 @@ local function findBattleUI()
         end
     end
 
-    -- Fight button: direct property access
-    local fightC = battleGui:FindFirstChild("Fight")
+    -- Fight button: The game names this "BattleUi", NOT "Fight"!
+    -- Check both names for robustness
+    local fightC = battleGui:FindFirstChild("BattleUi") or battleGui:FindFirstChild("Fight")
     if fightC then
         local vis = true
         pcall(function() vis = fightC.Visible end)
@@ -1653,31 +1654,44 @@ end
 
 local function clickButton(button)
     if not button then return false end
+    local clicked = false
     
     -- Method 1: fireclick (common executor function)
-    local ok1 = pcall(function()
+    pcall(function()
         if fireclick then
             fireclick(button)
+            clicked = true
         end
     end)
-    if ok1 and fireclick then return true end
+    if clicked then return true end
     
     -- Method 2: firesignal on MouseButton1Click
-    local ok2 = pcall(function()
+    pcall(function()
         if firesignal then
             firesignal(button.MouseButton1Click)
+            clicked = true
         end
     end)
-    if ok2 and firesignal then return true end
+    if clicked then return true end
     
-    -- Method 3: Direct :Fire() on MouseButton1Click (some executors allow this)
-    local ok3 = pcall(function()
-        button.MouseButton1Click:Fire()
+    -- Method 3: VirtualInputManager (try both coordinate systems)
+    -- Some executors include GuiInset in AbsolutePosition, some don't
+    pcall(function()
+        local pos = button.AbsolutePosition
+        local sz = button.AbsoluteSize
+        local cx = pos.X + (sz.X / 2)
+        local cy = pos.Y + (sz.Y / 2)
+        
+        -- Try without inset first (most common)
+        VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, true, game, 1)
+        task.wait(0.05)
+        VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, false, game, 1)
+        clicked = true
     end)
-    if ok3 then return true end
+    if clicked then return true end
     
     -- Method 4: VirtualInputManager with GuiInset offset
-    local ok4 = pcall(function()
+    pcall(function()
         local inset = game:GetService("GuiService"):GetGuiInset()
         local pos = button.AbsolutePosition
         local sz = button.AbsoluteSize
@@ -1686,20 +1700,9 @@ local function clickButton(button)
         VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, true, game, 1)
         task.wait(0.05)
         VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, false, game, 1)
+        clicked = true
     end)
-    if ok4 then return true end
-    
-    -- Method 5: VirtualInputManager WITHOUT GuiInset (some executors already include it)
-    local ok5 = pcall(function()
-        local pos = button.AbsolutePosition
-        local sz = button.AbsoluteSize
-        local cx = pos.X + (sz.X / 2)
-        local cy = pos.Y + (sz.Y / 2)
-        VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, true, game, 1)
-        task.wait(0.05)
-        VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, false, game, 1)
-    end)
-    if ok5 then return true end
+    if clicked then return true end
     
     return false
 end
