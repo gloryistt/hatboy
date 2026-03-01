@@ -120,84 +120,286 @@ end
 log("INFO", "Initializing LumiWare " .. VERSION .. " for:", PLAYER_NAME)
 
 --------------------------------------------------
--- GAME API EXFILTRATION (v4.6 — Hardened)
+-- GAME API EXFILTRATION (v4.6 — Adaptive Discovery)
+-- The game updates frequently, so we use multiple strategies
+-- and a diagnostic mode to discover changed key names.
 --------------------------------------------------
 local gameAPI = nil
 local gameAPIReady = false  -- true ONLY after all hooks are installed
 local setThreadContext = setthreadcontext or function(_) end
 
--- Multiple search strategies to find the internal module table.
--- The game may have renamed or restructured — try several key combos.
-local SEARCH_KEYS = {
-    {"Utilities", "Battle"},        -- original structure
-    {"Utilities", "Network"},       -- if Battle was renamed
-    {"Battle", "Network"},          -- if Utilities was removed
-    {"DataManager", "Network"},     -- alternative
-    {"BattleGui", "Network"},       -- another fallback
-}
-
-local function isGameAPITable(t)
-    if type(t) ~= "table" then return false end
-    for _, keys in ipairs(SEARCH_KEYS) do
-        local ok = true
-        for _, k in ipairs(keys) do
-            if not rawget(t, k) then ok = false; break end
+-- ============================================================
+-- DIAGNOSTIC: Dump all "interesting" tables from getgc to the
+-- output/console so the user can report what keys exist now.
+-- This only runs if the normal search fails after many attempts.
+-- ============================================================
+local function dumpCandidateTables()
+    log("DIAG", "========== DUMPING CANDIDATE TABLES FROM getgc ==========")
+    local candidates = {}
+    pcall(function()
+        if not getgc then log("DIAG", "getgc not available"); return end
+        for _, obj in pairs(getgc(true)) do
+            if type(obj) == "table" then
+                -- Count how many string keys point to tables/functions
+                local strKeys = {}
+                local funcCount = 0
+                local tableCount = 0
+                local total = 0
+                pcall(function()
+                    for k, v in pairs(obj) do
+                        if type(k) == "string" then
+                            total = total + 1
+                            table.insert(strKeys, k)
+                            if type(v) == "function" then funcCount = funcCount + 1 end
+                            if type(v) == "table" then tableCount = tableCount + 1 end
+                        end
+                        if total > 50 then break end -- Don't scan huge tables
+                    end
+                end)
+                -- Only interested in tables with many sub-tables (like a module registry)
+                if tableCount >= 4 and total >= 6 then
+                    table.insert(candidates, {keys = strKeys, funcs = funcCount, tables = tableCount, ref = obj})
+                end
+            end
         end
-        if ok then return true end
+    end)
+    
+    log("DIAG", "Found " .. #candidates .. " candidate tables with 4+ sub-tables")
+    for i, c in ipairs(candidates) do
+        if i > 15 then log("DIAG", "... (" .. (#candidates - 15) .. " more)"); break end
+        -- Sort keys for readability
+        table.sort(c.keys)
+        local keyStr = table.concat(c.keys, ", ")
+        if #keyStr > 300 then keyStr = keyStr:sub(1, 300) .. "..." end
+        log("DIAG", string.format("  Table #%d: %d keys (%d funcs, %d tables): [%s]",
+            i, #c.keys, c.funcs, c.tables, keyStr))
     end
-    return false
+    
+    -- Also dump from debug.getregistry
+    pcall(function()
+        if not debug or not debug.getregistry then return end
+        local regCandidates = 0
+        for _, func in pairs(debug.getregistry()) do
+            if type(func) == "function" then
+                pcall(function()
+                    if not getupvalues then return end
+                    local upvals = getupvalues(func)
+                    if type(upvals) == "table" then
+                        for _, upv in pairs(upvals) do
+                            if type(upv) == "table" then
+                                local strKeys = {}
+                                local tableCount = 0
+                                for k, v in pairs(upv) do
+                                    if type(k) == "string" then
+                                        table.insert(strKeys, k)
+                                        if type(v) == "table" then tableCount = tableCount + 1 end
+                                    end
+                                    if #strKeys > 50 then break end
+                                end
+                                if tableCount >= 4 and #strKeys >= 6 then
+                                    regCandidates = regCandidates + 1
+                                    if regCandidates <= 10 then
+                                        table.sort(strKeys)
+                                        local ks = table.concat(strKeys, ", ")
+                                        if #ks > 300 then ks = ks:sub(1, 300) .. "..." end
+                                        log("DIAG", string.format("  Registry upvalue #%d: %d keys (%d tables): [%s]",
+                                            regCandidates, #strKeys, tableCount, ks))
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end)
+            end
+        end
+        log("DIAG", "Registry scan found " .. regCandidates .. " candidate upvalue tables")
+    end)
+    
+    log("DIAG", "========== END DIAGNOSTIC DUMP ==========")
+    log("DIAG", "Please share the output above so LumiWare can be updated for the new game version.")
 end
 
+-- ============================================================
+-- FLEXIBLE MATCHING: Instead of requiring exact key names,
+-- use a scoring system. The table with the highest score wins.
+-- ============================================================
+local KNOWN_KEYS = {
+    -- High-confidence keys (score 10 each)
+    Battle = 10, Network = 10, Utilities = 10, DataManager = 10,
+    BattleGui = 10, NPCChat = 10, MasterControl = 10, Menu = 10,
+    
+    -- Medium-confidence keys (score 5 each)
+    PlayerData = 5, Repel = 5, WalkEvents = 5, BattleClientSprite = 5,
+    BattleClientSide = 5, Constants = 5, Assets = 5, Fishing = 5,
+    ObjectiveManager = 5, RoundedFrame = 5, BitBuffer = 5,
+    
+    -- Low-confidence but helpful (score 3 each)
+    Mining = 3, ArcadeController = 3,
+}
+
+-- Also try common variations (renamed keys in updates)
+local VARIANT_KEYS = {
+    -- Possible renames of "Battle"
+    battle = 10, BattleManager = 10, BattleSystem = 10, BattleModule = 10,
+    CombatManager = 10, Combat = 10,
+    -- Possible renames of "Network"
+    network = 10, NetworkManager = 10, Net = 10, RemoteManager = 10,
+    ServerAPI = 10, API = 8,
+    -- Possible renames of "Utilities"  
+    utilities = 10, Utils = 10, Util = 10, Helper = 8, Helpers = 8,
+    -- Possible renames of "DataManager"
+    dataManager = 10, Data = 8, DataModule = 8, GameData = 8,
+    -- Possible renames of "Menu"
+    menu = 10, MenuManager = 10, UI = 8, GuiManager = 8,
+    -- Possible renames of "MasterControl"
+    masterControl = 10, Controller = 8, PlayerController = 8,
+    InputManager = 8, MovementController = 8,
+    -- Possible renames of "PlayerData"
+    playerData = 5, Player = 5, LocalPlayerData = 5,
+    -- Possible renames of "Repel"
+    repel = 5, RepelSystem = 5,
+    -- Possible renames of "WalkEvents"
+    walkEvents = 5, Walk = 5, Movement = 5,
+    -- Possible renames of "NPCChat"
+    npcChat = 10, Chat = 8, Dialogue = 8, DialogueManager = 8,
+    -- Possible renames of "BattleGui"
+    battleGui = 10, BattleUI = 10, CombatUI = 10,
+}
+
+local function scoreTable(t)
+    if type(t) ~= "table" then return 0 end
+    local score = 0
+    local matchedKeys = {}
+    pcall(function()
+        for k, _ in pairs(t) do
+            if type(k) == "string" then
+                if KNOWN_KEYS[k] then
+                    score = score + KNOWN_KEYS[k]
+                    table.insert(matchedKeys, k)
+                elseif VARIANT_KEYS[k] then
+                    score = score + VARIANT_KEYS[k]
+                    table.insert(matchedKeys, k .. "(variant)")
+                end
+            end
+        end
+    end)
+    return score, matchedKeys
+end
+
+local MIN_SCORE_THRESHOLD = 15  -- Need at least 15 points to be considered
+
 local function initGameAPI()
-    -- Strategy 1: getgc scan
+    local bestScore = 0
+    local bestTable = nil
+    local bestKeys = {}
+    
+    -- Strategy 1: getgc scan (most reliable)
     pcall(function()
         if not getgc then return end
         for _, obj in pairs(getgc(true)) do
-            if isGameAPITable(obj) then
-                gameAPI = obj
-                return
+            if type(obj) == "table" then
+                local score, keys = scoreTable(obj)
+                if score > bestScore then
+                    bestScore = score
+                    bestTable = obj
+                    bestKeys = keys
+                end
             end
         end
     end)
     
     -- Strategy 2: debug.getregistry upvalue scan
-    if not gameAPI then
-        pcall(function()
-            if not debug or not debug.getregistry then return end
-            for _, func in pairs(debug.getregistry()) do
-                if gameAPI then return end
-                if type(func) == "function" then
-                    pcall(function()
-                        local upvals = getupvalues(func)
-                        if type(upvals) == "table" then
-                            for _, upv in pairs(upvals) do
-                                if isGameAPITable(upv) then
-                                    gameAPI = upv
-                                    return
+    pcall(function()
+        if not debug or not debug.getregistry then return end
+        for _, func in pairs(debug.getregistry()) do
+            if type(func) == "function" then
+                pcall(function()
+                    if not getupvalues then return end
+                    local upvals = getupvalues(func)
+                    if type(upvals) == "table" then
+                        for _, upv in pairs(upvals) do
+                            if type(upv) == "table" then
+                                local score, keys = scoreTable(upv)
+                                if score > bestScore then
+                                    bestScore = score
+                                    bestTable = upv
+                                    bestKeys = keys
                                 end
                             end
                         end
-                    end)
+                    end
+                end)
+            end
+        end
+    end)
+    
+    -- Strategy 3: scan getreg if available
+    pcall(function()
+        if not getreg then return end
+        for _, v in pairs(getreg()) do
+            if type(v) == "table" then
+                local score, keys = scoreTable(v)
+                if score > bestScore then
+                    bestScore = score
+                    bestTable = v
+                    bestKeys = keys
                 end
             end
-        end)
-    end
+        end
+    end)
     
-    -- Strategy 3: scan require cache / loaded modules
-    if not gameAPI then
-        pcall(function()
-            if not getrenv or not getrenv().require then return end
-            -- Some executors expose the module cache
-            if getreg then
-                for _, v in pairs(getreg()) do
-                    if gameAPI then return end
-                    if isGameAPITable(v) then
-                        gameAPI = v
+    -- Strategy 4: Try requiring known game modules from ReplicatedStorage
+    pcall(function()
+        local RS = game:GetService("ReplicatedStorage")
+        if not RS then return end
+        -- Try to find modules that might contain/reference the game API
+        local moduleNames = {"SharedModules", "Modules", "GameModules", "Common", "Shared", "Client"}
+        for _, name in ipairs(moduleNames) do
+            pcall(function()
+                local folder = RS:FindFirstChild(name, true)
+                if folder then
+                    for _, child in pairs(folder:GetDescendants()) do
+                        if child:IsA("ModuleScript") then
+                            pcall(function()
+                                local mod = require(child)
+                                if type(mod) == "table" then
+                                    local score, keys = scoreTable(mod)
+                                    if score > bestScore then
+                                        bestScore = score
+                                        bestTable = mod
+                                        bestKeys = keys
+                                    end
+                                end
+                            end)
+                        end
                     end
                 end
-            end
-        end)
+            end)
+        end
+    end)
+    
+    if bestScore >= MIN_SCORE_THRESHOLD then
+        gameAPI = bestTable
+        log("API", string.format("gameAPI found! Score: %d, Matched keys: [%s]",
+            bestScore, table.concat(bestKeys, ", ")))
     end
+end
+
+-- Helper: safely get a key from gameAPI, trying known names + variants
+local function apiGet(primaryKey, ...)
+    if not gameAPI then return nil end
+    -- Try primary key first
+    local val = rawget(gameAPI, primaryKey)
+    if val then return val end
+    -- Try lowercase
+    val = rawget(gameAPI, primaryKey:sub(1,1):lower() .. primaryKey:sub(2))
+    if val then return val end
+    -- Try variants
+    for _, variant in ipairs({...}) do
+        val = rawget(gameAPI, variant)
+        if val then return val end
+    end
+    return nil
 end
 
 -- Log diagnostic info about what was found
@@ -207,16 +409,16 @@ local function logGameAPIStatus()
         return
     end
     local found = {}
-    local check = {"Battle","Network","Menu","DataManager","Utilities","BattleGui",
-                    "NPCChat","MasterControl","Repel","WalkEvents","PlayerData",
-                    "BattleClientSprite","BattleClientSide","RoundedFrame",
-                    "Constants","Assets","Fishing","ObjectiveManager","Mining"}
-    for _, k in ipairs(check) do
-        if rawget(gameAPI, k) then
-            table.insert(found, k)
+    pcall(function()
+        for k, v in pairs(gameAPI) do
+            if type(k) == "string" then
+                local vtype = type(v)
+                table.insert(found, k .. "(" .. vtype .. ")")
+            end
         end
-    end
-    log("API", "gameAPI found with keys: " .. table.concat(found, ", "))
+    end)
+    table.sort(found)
+    log("API", "gameAPI ALL keys: " .. table.concat(found, ", "))
 end
 
 task.spawn(function()
@@ -225,8 +427,21 @@ task.spawn(function()
         attempts = attempts + 1
         initGameAPI()
         if not gameAPI then
-            if attempts % 10 == 0 then
-                log("API", "Still searching for gameAPI... (attempt " .. attempts .. ")")
+            if attempts == 5 then
+                log("API", "gameAPI not found after 5 attempts, running diagnostic dump...")
+                dumpCandidateTables()
+            end
+            if attempts % 15 == 0 then
+                log("API", "Still searching for gameAPI... (attempt " .. attempts .. ", min score needed: " .. MIN_SCORE_THRESHOLD .. ")")
+                -- Lower threshold progressively
+                if attempts >= 30 and MIN_SCORE_THRESHOLD > 8 then
+                    MIN_SCORE_THRESHOLD = 8
+                    log("API", "Lowered score threshold to 8")
+                end
+                if attempts >= 60 and MIN_SCORE_THRESHOLD > 3 then
+                    MIN_SCORE_THRESHOLD = 3
+                    log("API", "Lowered score threshold to 3 — looking for ANY partial match")
+                end
             end
             task.wait(1)
         end
@@ -235,12 +450,21 @@ task.spawn(function()
     logGameAPIStatus()
     
     -- Install hooks safely (each in its own pcall so one failure doesn't block others)
+    -- Use apiGet() to find keys by primary name + variants
+    
+    local Battle = apiGet("Battle", "battle", "BattleManager", "BattleSystem", "CombatManager", "Combat")
+    local DataMgr = apiGet("DataManager", "dataManager", "Data", "DataModule", "GameData")
+    local Net = apiGet("Network", "network", "NetworkManager", "Net", "RemoteManager", "ServerAPI", "API")
+    local BGui = apiGet("BattleGui", "battleGui", "BattleUI", "CombatUI")
+    local MenuMod = apiGet("Menu", "menu", "MenuManager")
+    local MC = apiGet("MasterControl", "masterControl", "Controller", "PlayerController", "MovementController")
+    local NPC = apiGet("NPCChat", "npcChat", "Chat", "Dialogue", "DialogueManager")
     
     -- Hook setupScene
     pcall(function()
-        if gameAPI.Battle and gameAPI.Battle.setupScene then
-            local old = gameAPI.Battle.setupScene
-            gameAPI.Battle.setupScene = function(...)
+        if Battle and Battle.setupScene then
+            local old = Battle.setupScene
+            Battle.setupScene = function(...)
                 setThreadContext(2)
                 return old(...)
             end
@@ -250,9 +474,9 @@ task.spawn(function()
     
     -- Hook loadModule
     pcall(function()
-        if gameAPI.DataManager and gameAPI.DataManager.loadModule then
-            local old = gameAPI.DataManager.loadModule
-            gameAPI.DataManager.loadModule = function(...)
+        if DataMgr and DataMgr.loadModule then
+            local old = DataMgr.loadModule
+            DataMgr.loadModule = function(...)
                 setThreadContext(2)
                 return old(...)
             end
@@ -262,9 +486,9 @@ task.spawn(function()
     
     -- Hook loadChunk
     pcall(function()
-        if gameAPI.DataManager and gameAPI.DataManager.loadChunk then
-            local old = gameAPI.DataManager.loadChunk
-            gameAPI.DataManager.loadChunk = function(...)
+        if DataMgr and DataMgr.loadChunk then
+            local old = DataMgr.loadChunk
+            DataMgr.loadChunk = function(...)
                 setThreadContext(2)
                 return old(...)
             end
@@ -274,15 +498,15 @@ task.spawn(function()
     
     -- Hook doTrainerBattle to wait for heal before trainer battles
     pcall(function()
-        if gameAPI.Battle and gameAPI.Battle.doTrainerBattle then
-            local old = gameAPI.Battle.doTrainerBattle
-            gameAPI.Battle.doTrainerBattle = function(...)
-                if config.autoHealEnabled then
+        if Battle and Battle.doTrainerBattle then
+            local old = Battle.doTrainerBattle
+            Battle.doTrainerBattle = function(...)
+                if config.autoHealEnabled and Net then
                     local maxWait = 60
                     local start = tick()
                     while (tick() - start) < maxWait do
                         local ok, fullHP = pcall(function()
-                            return gameAPI.Network:get("PDS", "areFullHealth")
+                            return Net:get("PDS", "areFullHealth")
                         end)
                         if ok and fullHP then break end
                         task.wait(0.5)
@@ -295,11 +519,11 @@ task.spawn(function()
         end
     end)
     
-    -- Hook switchMonster (from original — needed for proper battle automation)
+    -- Hook switchMonster
     pcall(function()
-        if gameAPI.BattleGui and gameAPI.BattleGui.switchMonster then
-            local old = gameAPI.BattleGui.switchMonster
-            gameAPI.BattleGui.switchMonster = function(...)
+        if BGui and BGui.switchMonster then
+            local old = BGui.switchMonster
+            BGui.switchMonster = function(...)
                 setThreadContext(2)
                 return old(...)
             end
@@ -309,9 +533,9 @@ task.spawn(function()
     
     -- Suppress mastery progress when masteryDisable is on
     pcall(function()
-        if gameAPI.Menu and gameAPI.Menu.mastery and gameAPI.Menu.mastery.showProgressUpdate then
-            local old = gameAPI.Menu.mastery.showProgressUpdate
-            gameAPI.Menu.mastery.showProgressUpdate = function(...)
+        if MenuMod and MenuMod.mastery and MenuMod.mastery.showProgressUpdate then
+            local old = MenuMod.mastery.showProgressUpdate
+            MenuMod.mastery.showProgressUpdate = function(...)
                 if config.masteryDisable then return end
                 return old(...)
             end
@@ -321,8 +545,8 @@ task.spawn(function()
     
     -- Remove unstuck cooldown
     pcall(function()
-        if gameAPI.Menu and gameAPI.Menu.options then
-            gameAPI.Menu.options.resetLastUnstuckTick = function() end
+        if MenuMod and MenuMod.options then
+            MenuMod.options.resetLastUnstuckTick = function() end
             log("HOOK", "Unstuck cooldown removed")
         end
     end)
@@ -331,9 +555,9 @@ task.spawn(function()
     task.spawn(function()
         while task.wait(0.5) do
             pcall(function()
-                if gameAPI.MasterControl and gameAPI.MasterControl.WalkEnabled then
+                if MC and MC.WalkEnabled then
                     local inBattle = false
-                    pcall(function() inBattle = gameAPI.Battle and gameAPI.Battle.currentBattle ~= nil end)
+                    pcall(function() inBattle = Battle and Battle.currentBattle ~= nil end)
                     if not inBattle then
                         workspace.Camera.FieldOfView = 70
                     end
@@ -341,6 +565,53 @@ task.spawn(function()
             end)
         end
     end)
+    
+    -- ============================================================
+    -- KEY ALIASING: Ensure that gameAPI.Battle, gameAPI.Network etc.
+    -- all exist even if the game renamed them. The rest of the code
+    -- uses these canonical names, so we create aliases.
+    -- ============================================================
+    local ALIAS_MAP = {
+        Battle    = {"battle", "BattleManager", "BattleSystem", "CombatManager", "Combat"},
+        Network   = {"network", "NetworkManager", "Net", "RemoteManager", "ServerAPI", "API"},
+        Menu      = {"menu", "MenuManager"},
+        DataManager = {"dataManager", "Data", "DataModule", "GameData"},
+        Utilities = {"utilities", "Utils", "Util", "Helper", "Helpers"},
+        BattleGui = {"battleGui", "BattleUI", "CombatUI"},
+        NPCChat   = {"npcChat", "Chat", "Dialogue", "DialogueManager"},
+        MasterControl = {"masterControl", "Controller", "PlayerController", "MovementController"},
+        PlayerData = {"playerData", "Player", "LocalPlayerData"},
+        Repel      = {"repel", "RepelSystem"},
+        WalkEvents = {"walkEvents", "Walk", "Movement"},
+        BattleClientSprite = {"battleClientSprite"},
+        BattleClientSide   = {"battleClientSide"},
+        Constants  = {"constants"},
+        Assets     = {"assets"},
+        Fishing    = {"fishing", "FishingModule"},
+        ObjectiveManager = {"objectiveManager"},
+        RoundedFrame = {"roundedFrame"},
+        BitBuffer  = {"bitBuffer"},
+        ArcadeController = {"arcadeController"},
+    }
+    
+    local aliasCount = 0
+    for canonicalName, variants in pairs(ALIAS_MAP) do
+        if not rawget(gameAPI, canonicalName) then
+            -- Try to find it under a variant name
+            for _, variant in ipairs(variants) do
+                local val = rawget(gameAPI, variant)
+                if val then
+                    gameAPI[canonicalName] = val
+                    aliasCount = aliasCount + 1
+                    log("ALIAS", canonicalName .. " -> " .. variant)
+                    break
+                end
+            end
+        end
+    end
+    if aliasCount > 0 then
+        log("ALIAS", "Created " .. aliasCount .. " key aliases for compatibility")
+    end
     
     gameAPIReady = true
     log("INFO", "All gameAPI hooks installed successfully. LumiWare is ready.")
@@ -4192,18 +4463,22 @@ end)
 
 
 --------------------------------------------------------------------------------
--- DIALOGUE & POPUP INTERCEPTOR (Rewritten — matches original's suppress logic)
--- Key insight: For deny cases, we DON'T call the original function.
--- The game's message/Say functions yield (wait for user input). By returning
--- without calling original, the coroutine auto-advances with default answer (No).
--- For "give up on learning", we return true to answer Yes.
+-- DIALOGUE & POPUP INTERCEPTOR (Rewritten to match original exactly)
+--
+-- CRITICAL INSIGHT from the original obfuscated code (v112/vu106):
+-- The original's wrapper NEVER calls the original message/Say function.
+-- For deny cases, the original REPLACES the [y/n] text with plain text
+-- (removing the [y/n] prefix), then calls original → game shows text but
+-- doesn't prompt for Y/N since the prefix is gone → auto-advances.
+-- For "give up learning", returns true to auto-answer Yes.
+-- For skip dialogue, filters out non-interactive text.
 --------------------------------------------------------------------------------
 task.spawn(function()
-    while not gameAPI do task.wait() end
+    -- MUST wait for gameAPIReady (not just gameAPI) to ensure aliases are in place
+    while not gameAPIReady do task.wait() end
     
-    -- Core dialogue processor (returns: processedArgs, shouldShow)
-    -- If shouldShow is falsy, the dialogue is suppressed entirely.
-    -- If processedArgs == "Y/N", return shouldShow directly (answer the question).
+    -- Core dialogue processor — returns (processedArgs, shouldShow)
+    -- This mirrors vu106 from the original exactly.
     local function processDialogue(funcName, ...)
         local args = {...}
         local processed = {}
@@ -4214,20 +4489,20 @@ task.spawn(function()
             
             -- [NoSkip] messages must always be shown
             if msg:sub(1, 8) == "[NoSkip]" then
-                args[2] = msg:sub(9)
-                return args, true
+                return {args[1], msg:sub(9)}, true
             end
             
             -- Handle [y/n] prompts — deny logic
+            -- Key: we REPLACE the text (removing [y/n] prefix so game doesn't
+            -- prompt for user input), then let it fall through to display.
             if msg:sub(1, 5):lower() == "[y/n]" then
                 if config.autoDenySwitch and msg:find("Will you switch Loomians") then
-                    -- Suppress the Y/N prompt entirely → game defaults to No
-                    return {}, false
+                    args[2] = "Auto Deny Switch Question Enabled!"
                 elseif config.autoDenyNick and msg:find("Give a nickname to the") then
-                    return {}, false
+                    args[2] = "Auto Deny Nickname Enabled!"
                 elseif config.autoDenyMove then
                     if msg:find("reassign its moves") then
-                        return {}, false
+                        args[2] = "Auto Deny Reassign Move Enabled!"
                     elseif msg:find(" to give up on learning ") then
                         -- Answer "Yes" to give up learning the move
                         return "Y/N", true
@@ -4244,10 +4519,10 @@ task.spawn(function()
                 else
                     local vLower = v:lower()
                     if vLower:sub(1, 5) == "[y/n]" then
+                        -- Keep Y/N prompts (unless already handled by deny above)
                         table.insert(processed, v)
                         shouldShow = true
                     elseif vLower:sub(1, 9) == "[gamepad]" then
-                        -- Strip gamepad prefix
                         local stripped = v:sub(10)
                         if stripped:sub(1, 4):lower() == "[ma]" or stripped:sub(1, 5) == "[pma]" then
                             table.insert(processed, v)
@@ -4269,33 +4544,87 @@ task.spawn(function()
         return processed, shouldShow
     end
     
+    -- Hook that wraps the function (matching original's v112 pattern)
     local function hookDialogueFunc(tbl, funcName)
-        if not tbl or not tbl[funcName] then return end
+        if not tbl or not tbl[funcName] then return false end
         local original = tbl[funcName]
         tbl[funcName] = function(...)
             local result, shouldShow = processDialogue(funcName, ...)
             
             -- "Y/N" means auto-answer the question
             if result == "Y/N" then
-                return shouldShow  -- true = Yes, false = No
+                return shouldShow  -- true = Yes
             end
             
             -- If shouldShow is truthy, call original with processed args
+            -- The original function handles displaying and yielding
             if shouldShow then
                 setThreadContext(2)
                 return original(unpack(result))
             end
             
-            -- shouldShow is falsy: suppress dialogue entirely (don't call original)
-            -- The calling coroutine will continue as if user dismissed it.
+            -- shouldShow is falsy: dialogue should be skipped.
+            -- Don't call original — no yield happens, game continues.
             return
         end
-        log("HOOK", "Dialogue function " .. funcName .. " hooked")
+        log("HOOK", "Dialogue function '" .. funcName .. "' hooked on table")
+        return true
     end
 
-    pcall(function() hookDialogueFunc(gameAPI.BattleGui, "message") end)
-    pcall(function() hookDialogueFunc(gameAPI.NPCChat, "Say") end)
-    pcall(function() hookDialogueFunc(gameAPI.NPCChat, "say") end)
+    -- Try to hook using canonical names first
+    local hookedMessage = false
+    local hookedSay = false
+    local hookedSayLower = false
+    
+    -- Try BattleGui.message
+    if gameAPI.BattleGui then
+        hookedMessage = hookDialogueFunc(gameAPI.BattleGui, "message")
+    end
+    
+    -- Try NPCChat.Say / .say
+    if gameAPI.NPCChat then
+        hookedSay = hookDialogueFunc(gameAPI.NPCChat, "Say")
+        hookedSayLower = hookDialogueFunc(gameAPI.NPCChat, "say")
+    end
+    
+    -- FALLBACK: If hooks failed, scan ALL gameAPI sub-tables for matching functions
+    if not hookedMessage or (not hookedSay and not hookedSayLower) then
+        log("HOOK", "Dialogue fallback: scanning gameAPI for message/Say functions...")
+        for k, v in pairs(gameAPI) do
+            if type(v) == "table" then
+                -- Look for tables with "message" function (BattleGui equivalent)
+                if not hookedMessage and type(rawget(v, "message")) == "function" then
+                    hookedMessage = hookDialogueFunc(v, "message")
+                    if hookedMessage then
+                        log("HOOK", "Found 'message' on gameAPI." .. tostring(k))
+                        -- Also alias it for future use
+                        if not gameAPI.BattleGui then gameAPI.BattleGui = v end
+                    end
+                end
+                -- Look for tables with "Say" function (NPCChat equivalent)
+                if not hookedSay and type(rawget(v, "Say")) == "function" then
+                    hookedSay = hookDialogueFunc(v, "Say")
+                    if hookedSay then
+                        log("HOOK", "Found 'Say' on gameAPI." .. tostring(k))
+                        if not gameAPI.NPCChat then gameAPI.NPCChat = v end
+                    end
+                end
+                if not hookedSayLower and type(rawget(v, "say")) == "function" then
+                    hookedSayLower = hookDialogueFunc(v, "say")
+                    if hookedSayLower then
+                        log("HOOK", "Found 'say' on gameAPI." .. tostring(k))
+                        if not gameAPI.NPCChat then gameAPI.NPCChat = v end
+                    end
+                end
+            end
+        end
+    end
+    
+    -- Log final status
+    if hookedMessage then log("HOOK", "✓ BattleGui.message dialogue hook active")
+    else log("WARN", "✗ Could not find BattleGui.message to hook") end
+    if hookedSay or hookedSayLower then log("HOOK", "✓ NPCChat.Say dialogue hook active")
+    else log("WARN", "✗ Could not find NPCChat.Say to hook") end
 end)
 
 
