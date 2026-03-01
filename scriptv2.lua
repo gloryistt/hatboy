@@ -38,6 +38,8 @@ local defaultConfig = {
     trainerAutoMoveSlot = 1,
     autoHealEnabled = false,
     autoHealThreshold = 30,      -- Heal when HP < X%
+    healRemoteName = "",
+    healRemotePath = "",
     automateTrainer = true,
     automateWild = true,
     infiniteRepel = false,       -- NEW v4.6
@@ -136,10 +138,12 @@ local function initGameAPI()
             for _, func in pairs(debug.getregistry()) do
                 if type(func) == "function" and not (gameAPI and gameAPI.Battle) then
                     pcall(function()
-                        local v1, v2 = getupvalues(func)
-                        for _, upv in pairs({v1, v2}) do
-                            if type(upv) == "table" and upv.Utilities then
-                                gameAPI = upv
+                        local upvals = getupvalues(func)
+                        if type(upvals) == "table" then
+                            for _, upv in pairs(upvals) do
+                                if type(upv) == "table" and rawget(upv, "Utilities") and not (gameAPI and gameAPI.Battle) then
+                                    gameAPI = upv
+                                end
                             end
                         end
                     end)
@@ -178,6 +182,43 @@ task.spawn(function()
             return oldLoadChunk(...)
         end
     end
+    
+    -- Hook doTrainerBattle to wait for heal before trainer battles (from original)
+    local oldDoTrainerBattle = gameAPI.Battle.doTrainerBattle
+    if oldDoTrainerBattle then
+        gameAPI.Battle.doTrainerBattle = function(...)
+            -- Wait until healed if auto-heal is on
+            if config.autoHealEnabled then
+                while true do
+                    local ok, fullHP = pcall(function()
+                        return gameAPI.Network:get("PDS", "areFullHealth")
+                    end)
+                    if ok and fullHP then break end
+                    task.wait(0.5)
+                end
+            end
+            setThreadContext(2)
+            return oldDoTrainerBattle(...)
+        end
+    end
+    
+    -- Remove unstuck cooldown (from original)
+    pcall(function()
+        if gameAPI.Menu and gameAPI.Menu.options then
+            gameAPI.Menu.options.resetLastUnstuckTick = function() end
+        end
+    end)
+    
+    -- FOV fix (from original)
+    task.spawn(function()
+        while task.wait(0.5) do
+            pcall(function()
+                if gameAPI.MasterControl and gameAPI.MasterControl.WalkEnabled and not (gameAPI.Battle and gameAPI.Battle.currentBattle) then
+                    workspace.Camera.FieldOfView = 70
+                end
+            end)
+        end
+    end)
 end)
 
 --------------------------------------------------
@@ -558,15 +599,17 @@ if config.autoDiscEnabled then
     end)
 end
 
--- NEW v4.6: Auto-heal
+-- NEW v4.6: Auto-heal (state)
 local autoHealEnabled = config.autoHealEnabled or false
-local infiniteRepelEnabled = config.infiniteRepel or false
+local autoHealThreshold = config.autoHealThreshold or 30
+local autoHealMethod = config.autoHealMethod or "remote"
+local scannedHealRemotes = {}
 local lastHealTime = 0
 local healCooldown = 15  -- seconds between heals
 
 -- Battle filter flags
-local automateTrainer = (config.automateTrainer ~= false)
-local automateWild = (config.automateWild ~= false)
+UI.automateTrainer = (config.automateTrainer ~= false)
+UI.automateWild = (config.automateWild ~= false)
 
 local currentBattle = {
     active = false,
@@ -601,150 +644,84 @@ local function performGameAPIHeal()
     
     if fullHealth then return end
     
-    log("HEAL", "Attempting Auto-Heal sequence...")
-    
-    -- Heuristic 1: Find healing remotes dynamically in ReplicatedStorage 
-    local healKeys = {"Heal", "heal", "Restore", "restore"}
-    local healed = false
-    
-    if config.healRemoteName ~= "" then
-        pcall(function() gameAPI.Network:post(config.healRemoteName) healed = true end)
-    end
-    
-    if not healed then
-        for _, rem in ipairs(game.ReplicatedStorage:GetDescendants()) do
-            if rem:IsA("RemoteEvent") or rem:IsA("RemoteFunction") then
-                for _, kw in pairs(healKeys) do
-                    if string.find(rem.Name, kw) then
-                        pcall(function() 
-                            if rem:IsA("RemoteEvent") then rem:FireServer() end
-                            healed = true
-                        end)
-                        break
-                    end
-                end
-            end
-        end
-    end
-
-    if healed then
-        task.wait(1)
-        pcall(function() fullHealth = gameAPI.Network:get("PDS", "areFullHealth") end)
-    end
-    
-    -- Heuristic 2: Port Teleport to nearest center
-    if not fullHealth then
-        pcall(function()
-            local oldPos = gameAPI.MasterControl.GetPosition()
-            local chunkName = gameAPI.DataManager.currentChunk.id
-            if chunkName then
-                -- Try known healing centers
-                local centerCoords = {
-                    chunk1 = Vector3.new(-120, 10, 450),
-                    chunk2 = Vector3.new(230, 15, -120),
-                    chunk3 = Vector3.new(-45, 12, 80)
-                }
-                local tgt = centerCoords[chunkName]
-                if tgt then
-                    gameAPI.MasterControl.SetPosition(tgt)
-                    task.wait(2)
-                    -- Trigger station touch/heal dialogue
-                    if gameAPI.NPCChat and gameAPI.NPCChat.Say then
-                        gameAPI.Network:post("PDS", "healStationTrig")
-                        task.wait(1.5)
-                    end
-                    gameAPI.MasterControl.SetPosition(oldPos)
-                    log("HEAL", "Teleport-based heal complete.")
-                else
-                    log("HEAL", "No fallback center available for this chunk.")
-                end
-            end
-        end)
-    end
-    
-    autoHealLastRun = tick()
-end
-    if not gameAPI then return end
-    
-    -- Only trigger if not at full health
-    local isFullHealth = gameAPI.Network:get("PDS", "areFullHealth")
-    if isFullHealth then return end
-    
+    log("HEAL", "Attempting gameAPI-based heal sequence...")
     isAutoHealing = true
-    lastHealTime = tick()
     
-    task.spawn(function()
-        xpcall(function()
-            local chunk = gameAPI.DataManager.currentChunk
-            if not chunk then isAutoHealing = false; return end
-            
-            -- Make sure we aren't in a battle or disabled
-            if gameAPI.Battle.currentBattle or gameAPI.ObjectiveManager.disabledBy.LoomianCare then
-                isAutoHealing = false; return
-            end
-            
-            log("HEAL", "Attempting Auto-Heal via Game API...")
-            
-            if chunk.data.HasOutsideHealers then
-                -- Outdoor healing (like rally ranch)
-                gameAPI.Network:get("heal", nil, "HealMachine1")
-                log("HEAL", "Outdoor heal triggered.")
-            else
-                -- Indoor healing (teleport to center)
-                local blackOutTo = chunk.regionData and chunk.regionData.BlackOutTo or chunk.data.blackOutTo
-                local chunkId = chunk.id
-                local origCFrame = client.Character and client.Character.PrimaryPart and client.Character.PrimaryPart.CFrame
-                
-                if blackOutTo and origCFrame then
-                    log("HEAL", "Teleporting to Loomian Center:", blackOutTo)
-                    gameAPI.MasterControl.WalkEnabled = false
-                    gameAPI.Menu:disable()
-                    gameAPI.Menu:fastClose(3)
-                    gameAPI.Utilities.FadeOut(1)
-                    
-                    gameAPI.Utilities.TeleportToSpawnBox()
-                    chunk:unbindIndoorCam()
-                    chunk:destroy()
-                    setThreadContext(2)
-                    chunk = gameAPI.DataManager:loadChunk(blackOutTo)
-                    
-                    local healthCenter = chunk:getRoom("HealthCenter", chunk:getDoor("HealthCenter"), 1)
-                    task.wait(0.5)
-                    local healerId = gameAPI.Network:get("getHealer", "HealthCenter")
-                    if healerId then
-                        gameAPI.Network:get("heal", "HealthCenter", healerId)
-                        log("HEAL", "Healed at Center successfully.")
-                    end
-                    
-                    task.wait(1)
-                    healthCenter:Destroy()
-                    chunk:destroy()
-                    gameAPI.DataManager:loadChunk(chunkId)
-                    gameAPI.Utilities.Teleport(origCFrame)
-                    gameAPI.Menu:enable()
-                    gameAPI.Utilities.FadeIn(1)
-                    gameAPI.MasterControl.WalkEnabled = true
-                else
-                    log("HEAL", "Could not determine blackout destination. Healing failed.")
-                end
-            end
-            
-        end, function(err)
-            log("HEAL", "AutoHeal Error:", err)
+    pcall(function()
+        local chunk = gameAPI.DataManager.currentChunk
+        
+        -- Method 1: If chunk has outdoor healers, use them directly
+        if chunk.data and chunk.data.HasOutsideHealers then
+            gameAPI.Network:get("heal", nil, "HealMachine1")
+            log("HEAL", "Used outdoor healer.")
+            isAutoHealing = false
+            return
+        end
+        
+        -- Method 2: Teleport to health center (ported from original)
+        local blackOutTarget = (chunk.regionData and chunk.regionData.BlackOutTo) or (chunk.data and chunk.data.blackOutTo)
+        local originalChunkId = chunk.id
+        local originalCFrame = nil
+        pcall(function()
+            originalCFrame = game.Players.LocalPlayer.Character.PrimaryPart.CFrame
         end)
         
-        isAutoHealing = false
+        if blackOutTarget then
+            local mc = gameAPI.MasterControl
+            mc.WalkEnabled = false
+            gameAPI.Menu:disable()
+            pcall(function() gameAPI.Menu:fastClose(3) end)
+            pcall(function() gameAPI.Utilities.FadeOut(1) end)
+            task.spawn(function()
+                pcall(function() gameAPI.NPCChat:Say("[ma][LumiWare]Auto healing...") end)
+            end)
+            pcall(function() gameAPI.Utilities.TeleportToSpawnBox() end)
+            pcall(function() chunk:unbindIndoorCam() end)
+            pcall(function() chunk:destroy() end)
+            setThreadContext(2)
+            chunk = gameAPI.DataManager:loadChunk(blackOutTarget)
+        end
+        
+        -- Get the health center room and healer
+        pcall(function()
+            local room = chunk:getRoom("HealthCenter", chunk:getDoor("HealthCenter"), 1)
+            task.wait()
+            local healer = gameAPI.Network:get("getHealer", "HealthCenter")
+            if healer then
+                gameAPI.Network:get("heal", "HealthCenter", healer)
+            end
+            if room then room:Destroy() end
+        end)
+        
+        -- Return to original location if we teleported
+        if blackOutTarget and originalChunkId then
+            pcall(function() chunk:destroy() end)
+            pcall(function() gameAPI.DataManager:loadChunk(originalChunkId) end)
+            if originalCFrame then
+                pcall(function() gameAPI.Utilities.Teleport(originalCFrame) end)
+            end
+            gameAPI.Menu:enable()
+            pcall(function() gameAPI.NPCChat:manualAdvance() end)
+            pcall(function() gameAPI.Utilities.FadeIn(1) end)
+            gameAPI.MasterControl.WalkEnabled = true
+        end
     end)
+    
+    isAutoHealing = false
+    lastHealTime = tick()
 end
 
--- Infinite Repel Loop
+
+-- Infinite Repel Loop (reads from config directly so button toggles work)
 task.spawn(function()
     while task.wait(1) do
-        if infiniteRepelEnabled and gameAPI and gameAPI.Repel then
+        if config.infiniteRepel and gameAPI and gameAPI.Repel then
             if gameAPI.Repel.steps < 10 then
                 gameAPI.Repel.steps = 100
                 logDebug("Repel steps reset to 100.")
             end
+        elseif gameAPI and gameAPI.Repel and not config.infiniteRepel then
+            -- Don't reset steps when disabled
         end
     end
 end)
@@ -909,100 +886,100 @@ mainFrame.BorderSizePixel = 0
 mainFrame.ClipsDescendants = false
 mainFrame.Parent = gui
 mainFrame.GroupTransparency = 1
-local mainScale = Instance.new("UIScale", mainFrame)
-mainScale.Scale = 0.9
+UI.mainScale = Instance.new("UIScale", mainFrame)
+UI.mainScale.Scale = 0.9
 
 Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 12)
 createShadow(mainFrame, 15, Vector2.new(0, 4))
-local stroke = Instance.new("UIStroke", mainFrame)
-stroke.Color = C.Accent
-stroke.Thickness = 1.5
-stroke.Transparency = 0.5
+UI.stroke = Instance.new("UIStroke", mainFrame)
+UI.stroke.Color = C.Accent
+UI.stroke.Thickness = 1.5
+UI.stroke.Transparency = 0.5
 
 -- SPLASH
-local splashFrame = Instance.new("Frame", mainFrame)
-splashFrame.Size = UDim2.fromScale(1, 1)
-splashFrame.BackgroundTransparency = 0
-splashFrame.BackgroundColor3 = C.BG
-splashFrame.ZIndex = 100
-Instance.new("UICorner", splashFrame).CornerRadius = UDim.new(0, 12)
-local splashGrad = Instance.new("UIGradient", splashFrame)
-splashGrad.Color = ColorSequence.new{
+UI.splashFrame = Instance.new("Frame", mainFrame)
+UI.splashFrame.Size = UDim2.fromScale(1, 1)
+UI.splashFrame.BackgroundTransparency = 0
+UI.splashFrame.BackgroundColor3 = C.BG
+UI.splashFrame.ZIndex = 100
+Instance.new("UICorner", UI.splashFrame).CornerRadius = UDim.new(0, 12)
+UI.splashGrad = Instance.new("UIGradient", UI.splashFrame)
+UI.splashGrad.Color = ColorSequence.new{
     ColorSequenceKeypoint.new(0, C.AccentDim),
     ColorSequenceKeypoint.new(1, C.BG)
 }
-splashGrad.Rotation = 90
+UI.splashGrad.Rotation = 90
 
-local splashLogo = Instance.new("TextLabel", splashFrame)
-splashLogo.Size = UDim2.fromScale(1, 1)
-splashLogo.BackgroundTransparency = 1
-splashLogo.Text = "⚡ LumiWare " .. VERSION
-splashLogo.Font = Enum.Font.GothamBlack
-splashLogo.TextSize = 34
-splashLogo.TextColor3 = C.Text
-splashLogo.ZIndex = 101
+UI.splashLogo = Instance.new("TextLabel", UI.splashFrame)
+UI.splashLogo.Size = UDim2.fromScale(1, 1)
+UI.splashLogo.BackgroundTransparency = 1
+UI.splashLogo.Text = "⚡ LumiWare " .. VERSION
+UI.splashLogo.Font = Enum.Font.GothamBlack
+UI.splashLogo.TextSize = 34
+UI.splashLogo.TextColor3 = C.Text
+UI.splashLogo.ZIndex = 101
 
-local splashUIScale = Instance.new("UIScale", splashLogo)
-splashUIScale.Scale = 0.8
+UI.splashUIScale = Instance.new("UIScale", UI.splashLogo)
+UI.splashUIScale.Scale = 0.8
 
 task.spawn(function()
     TweenService:Create(mainFrame, TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {GroupTransparency = 0}):Play()
-    TweenService:Create(splashUIScale, TweenInfo.new(1.2, Enum.EasingStyle.Exponential, Enum.EasingDirection.Out), {Scale = 1.05}):Play()
+    TweenService:Create(UI.splashUIScale, TweenInfo.new(1.2, Enum.EasingStyle.Exponential, Enum.EasingDirection.Out), {Scale = 1.05}):Play()
     task.wait(1.5)
-    TweenService:Create(splashFrame, TweenInfo.new(0.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {BackgroundTransparency = 1}):Play()
-    TweenService:Create(splashLogo, TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {TextTransparency = 1}):Play()
-    TweenService:Create(mainScale, TweenInfo.new(0.6, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Scale = 1}):Play()
+    TweenService:Create(UI.splashFrame, TweenInfo.new(0.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {BackgroundTransparency = 1}):Play()
+    TweenService:Create(UI.splashLogo, TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {TextTransparency = 1}):Play()
+    TweenService:Create(UI.mainScale, TweenInfo.new(0.6, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Scale = 1}):Play()
     task.wait(0.6)
-    splashFrame:Destroy()
+    UI.splashFrame:Destroy()
 end)
 
 -- TOPBAR
-local topbar = Instance.new("Frame", mainFrame)
-topbar.Size = UDim2.new(1, 0, 0, 36)
-topbar.BackgroundColor3 = C.TopBar
-topbar.BorderSizePixel = 0
-Instance.new("UICorner", topbar).CornerRadius = UDim.new(0, 10)
-local topFill = Instance.new("Frame", topbar)
-topFill.Size = UDim2.new(1, 0, 0, 10)
-topFill.Position = UDim2.new(0, 0, 1, -10)
-topFill.BackgroundColor3 = C.TopBar
-topFill.BorderSizePixel = 0
+UI.topbar = Instance.new("Frame", mainFrame)
+UI.topbar.Size = UDim2.new(1, 0, 0, 36)
+UI.topbar.BackgroundColor3 = C.TopBar
+UI.topbar.BorderSizePixel = 0
+Instance.new("UICorner", UI.topbar).CornerRadius = UDim.new(0, 10)
+UI.topFill = Instance.new("Frame", UI.topbar)
+UI.topFill.Size = UDim2.new(1, 0, 0, 10)
+UI.topFill.Position = UDim2.new(0, 0, 1, -10)
+UI.topFill.BackgroundColor3 = C.TopBar
+UI.topFill.BorderSizePixel = 0
 
-local titleLbl = Instance.new("TextLabel", topbar)
-titleLbl.Size = UDim2.new(1, -80, 1, 0)
-titleLbl.Position = UDim2.new(0, 12, 0, 0)
-titleLbl.BackgroundTransparency = 1
-titleLbl.Text = "⚡ LumiWare " .. VERSION
-titleLbl.Font = Enum.Font.GothamBold
-titleLbl.TextSize = 15
-titleLbl.TextColor3 = C.Accent
-titleLbl.TextXAlignment = Enum.TextXAlignment.Left
+UI.titleLbl = Instance.new("TextLabel", UI.topbar)
+UI.titleLbl.Size = UDim2.new(1, -80, 1, 0)
+UI.titleLbl.Position = UDim2.new(0, 12, 0, 0)
+UI.titleLbl.BackgroundTransparency = 1
+UI.titleLbl.Text = "⚡ LumiWare " .. VERSION
+UI.titleLbl.Font = Enum.Font.GothamBold
+UI.titleLbl.TextSize = 15
+UI.titleLbl.TextColor3 = C.Accent
+UI.titleLbl.TextXAlignment = Enum.TextXAlignment.Left
 
-local minBtn = Instance.new("TextButton", topbar)
-minBtn.Size = UDim2.fromOffset(28, 28)
-minBtn.Position = UDim2.new(1, -66, 0, 4)
-minBtn.BackgroundColor3 = C.PanelAlt
-minBtn.Text = "–"
-minBtn.Font = Enum.Font.GothamBold
-minBtn.TextSize = 18
-minBtn.TextColor3 = C.Text
-minBtn.BorderSizePixel = 0
-Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0, 6)
-addHoverEffect(minBtn, C.PanelAlt, C.AccentDim)
+UI.minBtn = Instance.new("TextButton", UI.topbar)
+UI.minBtn.Size = UDim2.fromOffset(28, 28)
+UI.minBtn.Position = UDim2.new(1, -66, 0, 4)
+UI.minBtn.BackgroundColor3 = C.PanelAlt
+UI.minBtn.Text = "–"
+UI.minBtn.Font = Enum.Font.GothamBold
+UI.minBtn.TextSize = 18
+UI.minBtn.TextColor3 = C.Text
+UI.minBtn.BorderSizePixel = 0
+Instance.new("UICorner", UI.minBtn).CornerRadius = UDim.new(0, 6)
+addHoverEffect(UI.minBtn, C.PanelAlt, C.AccentDim)
 
-local closeBtn = Instance.new("TextButton", topbar)
-closeBtn.Size = UDim2.fromOffset(28, 28)
-closeBtn.Position = UDim2.new(1, -34, 0, 4)
-closeBtn.BackgroundColor3 = C.PanelAlt
-closeBtn.Text = "×"
-closeBtn.Font = Enum.Font.GothamBold
-closeBtn.TextSize = 18
-closeBtn.TextColor3 = C.Text
-closeBtn.BorderSizePixel = 0
-Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 6)
-addHoverEffect(closeBtn, C.PanelAlt, C.Red)
+UI.closeBtn = Instance.new("TextButton", UI.topbar)
+UI.closeBtn.Size = UDim2.fromOffset(28, 28)
+UI.closeBtn.Position = UDim2.new(1, -34, 0, 4)
+UI.closeBtn.BackgroundColor3 = C.PanelAlt
+UI.closeBtn.Text = "×"
+UI.closeBtn.Font = Enum.Font.GothamBold
+UI.closeBtn.TextSize = 18
+UI.closeBtn.TextColor3 = C.Text
+UI.closeBtn.BorderSizePixel = 0
+Instance.new("UICorner", UI.closeBtn).CornerRadius = UDim.new(0, 6)
+addHoverEffect(UI.closeBtn, C.PanelAlt, C.Red)
 
-closeBtn.MouseButton1Click:Connect(function()
+UI.closeBtn.MouseButton1Click:Connect(function()
     local elapsed = tick() - UI.huntStartTime
     sendSessionWebhook(UI.encounterCount, formatTime(elapsed), raresFoundCount)
     gui:Destroy()
@@ -1010,13 +987,13 @@ end)
 
 -- Drag
 local dragging, dragInput, dragStart, startPos
-track(topbar.InputBegan:Connect(function(input)
+track(UI.topbar.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
         dragging = true; dragStart = input.Position; startPos = mainFrame.Position
         track(input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then dragging = false end end))
     end
 end))
-track(topbar.InputChanged:Connect(function(input)
+track(UI.topbar.InputChanged:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then dragInput = input end
 end))
 track(UserInputService.InputChanged:Connect(function(input)
@@ -1029,15 +1006,15 @@ end))
 --------------------------------------------------
 -- TAB BAR (4 tabs now)
 --------------------------------------------------
-local tabBar = Instance.new("Frame", mainFrame)
-tabBar.Size = UDim2.new(1, -16, 0, 30)
-tabBar.Position = UDim2.new(0, 8, 0, 44)
-tabBar.BackgroundTransparency = 1
-local tabLayout = Instance.new("UIListLayout", tabBar)
-tabLayout.FillDirection = Enum.FillDirection.Horizontal
-tabLayout.HorizontalAlignment = Enum.HorizontalAlignment.Left
-tabLayout.VerticalAlignment = Enum.VerticalAlignment.Center
-tabLayout.Padding = UDim.new(0, 4)
+UI.tabBar = Instance.new("Frame", mainFrame)
+UI.tabBar.Size = UDim2.new(1, -16, 0, 30)
+UI.tabBar.Position = UDim2.new(0, 8, 0, 44)
+UI.tabBar.BackgroundTransparency = 1
+UI.tabLayout = Instance.new("UIListLayout", UI.tabBar)
+UI.tabLayout.FillDirection = Enum.FillDirection.Horizontal
+UI.tabLayout.HorizontalAlignment = Enum.HorizontalAlignment.Left
+UI.tabLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+UI.tabLayout.Padding = UDim.new(0, 4)
 
 local function mkTabBtn(parent, text)
     local b = Instance.new("TextButton", parent)
@@ -1052,25 +1029,36 @@ local function mkTabBtn(parent, text)
     return b
 end
 
-UI.huntTabBtn = mkTabBtn(tabBar, "🗡️ HUNT")
-UI.masteryTabBtn = mkTabBtn(tabBar, "📖 MASTERY")
-UI.healTabBtn = mkTabBtn(tabBar, "💊 HEAL")
-UI.cfgTabBtn = mkTabBtn(tabBar, "⚙️ CONFIG")
+UI.huntTabBtn = mkTabBtn(UI.tabBar, "🗡️ HUNT")
+UI.masteryTabBtn = mkTabBtn(UI.tabBar, "📖 MASTERY")
+UI.healTabBtn = mkTabBtn(UI.tabBar, "💊 HEAL")
+UI.cfgTabBtn = mkTabBtn(UI.tabBar, "⚙️ CONFIG")
 
 -- CONTENT WRAPPER
-local contentContainer = Instance.new("Frame", mainFrame)
-contentContainer.Name = "ContentContainer"
-contentContainer.Size = UDim2.new(1, -16, 1, -82)
-contentContainer.Position = UDim2.new(0, 8, 0, 78)
-contentContainer.BackgroundTransparency = 1
+UI.contentContainer = Instance.new("Frame", mainFrame)
+UI.contentContainer.Name = "ContentContainer"
+UI.contentContainer.Size = UDim2.new(1, -16, 1, -82)
+UI.contentContainer.Position = UDim2.new(0, 8, 0, 78)
+UI.contentContainer.BackgroundTransparency = 1
 
 -- forward decl for addBattleLog
 local addBattleLog
 
+-- Make contentFrame scrollable since hunt tab exceeds visible area
+local contentScrollFrame = Instance.new("ScrollingFrame", UI.contentContainer)
+contentScrollFrame.Name = "HuntScrollWrapper"
+contentScrollFrame.Size = UDim2.new(1, 0, 1, 0)
+contentScrollFrame.BackgroundTransparency = 1
+contentScrollFrame.BorderSizePixel = 0
+contentScrollFrame.ScrollBarThickness = 5
+contentScrollFrame.ScrollBarImageColor3 = C.AccentDim
+contentScrollFrame.CanvasSize = UDim2.new(0, 0, 0, 1170)
+contentScrollFrame.Visible = true
+
 --==================================================
 -- MASTERY FRAME
 --==================================================
-UI.masteryFrame = Instance.new("Frame", contentContainer)
+UI.masteryFrame = Instance.new("Frame", UI.contentContainer)
 UI.masteryFrame.Size = UDim2.new(1, 0, 1, 0)
 UI.masteryFrame.BackgroundTransparency = 1
 UI.masteryFrame.Visible = false
@@ -1086,21 +1074,21 @@ UI.masterySearch.TextColor3 = C.Text
 UI.masterySearch.BorderSizePixel = 0
 UI.masterySearch.ClearTextOnFocus = false
 Instance.new("UICorner", UI.masterySearch).CornerRadius = UDim.new(0, 6)
-local searchPadding = Instance.new("UIPadding", UI.masterySearch)
-searchPadding.PaddingLeft = UDim.new(0, 12)
+UI.searchPadding = Instance.new("UIPadding", UI.masterySearch)
+UI.searchPadding.PaddingLeft = UDim.new(0, 12)
 
 UI.masterySessionPanel = Instance.new("Frame", UI.masteryFrame)
 UI.masterySessionPanel.Size = UDim2.new(1, 0, 0, 24)
 UI.masterySessionPanel.Position = UDim2.new(0, 0, 0, 44)
 UI.masterySessionPanel.BackgroundTransparency = 1
-local sessionLbl = Instance.new("TextLabel", UI.masterySessionPanel)
-sessionLbl.Size = UDim2.new(1, 0, 1, 0)
-sessionLbl.BackgroundTransparency = 1
-sessionLbl.Text = "Session: 0 KOs | 0.0k Damage"
-sessionLbl.Font = Enum.Font.GothamBold
-sessionLbl.TextSize = 11
-sessionLbl.TextColor3 = C.TextDim
-sessionLbl.TextXAlignment = Enum.TextXAlignment.Left
+UI.sessionLbl = Instance.new("TextLabel", UI.masterySessionPanel)
+UI.sessionLbl.Size = UDim2.new(1, 0, 1, 0)
+UI.sessionLbl.BackgroundTransparency = 1
+UI.sessionLbl.Text = "Session: 0 KOs | 0.0k Damage"
+UI.sessionLbl.Font = Enum.Font.GothamBold
+UI.sessionLbl.TextSize = 11
+UI.sessionLbl.TextColor3 = C.TextDim
+UI.sessionLbl.TextXAlignment = Enum.TextXAlignment.Left
 
 UI.masteryScroll = Instance.new("ScrollingFrame", UI.masteryFrame)
 UI.masteryScroll.Size = UDim2.new(1, 0, 1, -76)
@@ -1196,7 +1184,7 @@ populateMasteryList("")
 --==================================================
 -- CONFIG TAB FRAME (NEW)
 --==================================================
-UI.cfgFrame = Instance.new("ScrollingFrame", contentContainer)
+UI.cfgFrame = Instance.new("ScrollingFrame", UI.contentContainer)
 UI.cfgFrame.Size = UDim2.new(1, 0, 1, 0)
 UI.cfgFrame.BackgroundTransparency = 1
 UI.cfgFrame.BorderSizePixel = 0
@@ -1268,21 +1256,21 @@ local function mkSmallBtn(parent, text, xOff, yOff, w, h, col)
 end
 
 -- Section 1: Current Config Summary
-local cfgSummSec, _ = mkCfgSection(UI.cfgFrame, "📋 CURRENT CONFIG", C.Accent)
-cfgSummSec.Size = UDim2.new(1, -8, 0, 200)
+UI.cfgSummSec, _ = mkCfgSection(UI.cfgFrame, "📋 CURRENT CONFIG", C.Accent)
+UI.cfgSummSec.Size = UDim2.new(1, -8, 0, 200)
 
-local cfgAutoModeRow, cfgAutoModeVal = mkCfgRow(cfgSummSec, 30, "Wild Auto Mode:", config.autoMode, C.Green)
-local cfgTrainerModeRow, cfgTrainerModeVal = mkCfgRow(cfgSummSec, 56, "Trainer Auto Mode:", config.trainerAutoMode, C.Orange)
-local cfgWildSlotRow, cfgWildSlotVal = mkCfgRow(cfgSummSec, 82, "Wild Move Slot:", config.autoMoveSlot, C.Text)
-local cfgTrainerSlotRow, cfgTrainerSlotVal = mkCfgRow(cfgSummSec, 108, "Trainer Move Slot:", config.trainerAutoMoveSlot, C.Text)
-local cfgHealRow, cfgHealVal = mkCfgRow(cfgSummSec, 134, "Auto-Heal:", config.autoHealEnabled and "ON" or "OFF", C.Teal)
-local cfgThreshRow, cfgThreshVal = mkCfgRow(cfgSummSec, 160, "Heal Threshold:", config.autoHealThreshold .. "%", C.Teal)
+UI.cfgAutoModeRow, UI.cfgAutoModeVal = mkCfgRow(UI.cfgSummSec, 30, "Wild Auto Mode:", config.autoMode, C.Green)
+UI.cfgTrainerModeRow, UI.cfgTrainerModeVal = mkCfgRow(UI.cfgSummSec, 56, "Trainer Auto Mode:", config.trainerAutoMode, C.Orange)
+UI.cfgWildSlotRow, UI.cfgWildSlotVal = mkCfgRow(UI.cfgSummSec, 82, "Wild Move Slot:", config.autoMoveSlot, C.Text)
+UI.cfgTrainerSlotRow, UI.cfgTrainerSlotVal = mkCfgRow(UI.cfgSummSec, 108, "Trainer Move Slot:", config.trainerAutoMoveSlot, C.Text)
+UI.cfgHealRow, UI.cfgHealVal = mkCfgRow(UI.cfgSummSec, 134, "Auto-Heal:", config.autoHealEnabled and "ON" or "OFF", C.Teal)
+UI.cfgThreshRow, UI.cfgThreshVal = mkCfgRow(UI.cfgSummSec, 160, "Heal Threshold:", config.autoHealThreshold .. "%", C.Teal)
 
 -- Section 2: Webhook Config
-local cfgWhSec, _ = mkCfgSection(UI.cfgFrame, "📡 WEBHOOK CONFIG", C.Cyan)
-cfgWhSec.Size = UDim2.new(1, -8, 0, 96)
+UI.cfgWhSec, _ = mkCfgSection(UI.cfgFrame, "📡 WEBHOOK CONFIG", C.Cyan)
+UI.cfgWhSec.Size = UDim2.new(1, -8, 0, 96)
 
-UI.cfgWhInput = Instance.new("TextBox", cfgWhSec)
+UI.cfgWhInput = Instance.new("TextBox", UI.cfgWhSec)
 UI.cfgWhInput.Size = UDim2.new(1, -80, 0, 26)
 UI.cfgWhInput.Position = UDim2.new(0, 8, 0, 30)
 UI.cfgWhInput.BackgroundColor3 = C.PanelAlt
@@ -1297,11 +1285,11 @@ UI.cfgWhInput.TextXAlignment = Enum.TextXAlignment.Left
 Instance.new("UICorner", UI.cfgWhInput).CornerRadius = UDim.new(0, 5)
 Instance.new("UIPadding", UI.cfgWhInput).PaddingLeft = UDim.new(0, 6)
 
-UI.cfgWhSave = mkSmallBtn(cfgWhSec, "SAVE", 0, 30, 60, 26, C.Cyan)
+UI.cfgWhSave = mkSmallBtn(UI.cfgWhSec, "SAVE", 0, 30, 60, 26, C.Cyan)
 UI.cfgWhSave.Position = UDim2.new(1, -68, 0, 30)
 UI.cfgWhSave.TextColor3 = C.BG
 
-UI.cfgPingInput = Instance.new("TextBox", cfgWhSec)
+UI.cfgPingInput = Instance.new("TextBox", UI.cfgWhSec)
 UI.cfgPingInput.Size = UDim2.new(1, -16, 0, 22)
 UI.cfgPingInput.Position = UDim2.new(0, 8, 0, 64)
 UI.cfgPingInput.BackgroundColor3 = C.PanelAlt
@@ -1317,10 +1305,10 @@ Instance.new("UICorner", UI.cfgPingInput).CornerRadius = UDim.new(0, 5)
 Instance.new("UIPadding", UI.cfgPingInput).PaddingLeft = UDim.new(0, 6)
 
 -- Section 3: Custom Rares
-local cfgRareSec, _ = mkCfgSection(UI.cfgFrame, "⭐ CUSTOM RARES", C.Gold)
-cfgRareSec.Size = UDim2.new(1, -8, 0, 80)
+UI.cfgRareSec, _ = mkCfgSection(UI.cfgFrame, "⭐ CUSTOM RARES", C.Gold)
+UI.cfgRareSec.Size = UDim2.new(1, -8, 0, 80)
 
-UI.cfgRareInput = Instance.new("TextBox", cfgRareSec)
+UI.cfgRareInput = Instance.new("TextBox", UI.cfgRareSec)
 UI.cfgRareInput.Size = UDim2.new(1, -100, 0, 26)
 UI.cfgRareInput.Position = UDim2.new(0, 8, 0, 30)
 UI.cfgRareInput.BackgroundColor3 = C.PanelAlt
@@ -1335,13 +1323,13 @@ UI.cfgRareInput.TextXAlignment = Enum.TextXAlignment.Left
 Instance.new("UICorner", UI.cfgRareInput).CornerRadius = UDim.new(0, 5)
 Instance.new("UIPadding", UI.cfgRareInput).PaddingLeft = UDim.new(0, 6)
 
-UI.cfgRareAdd = mkSmallBtn(cfgRareSec, "+ ADD", 0, 30, 42, 26, C.Green)
+UI.cfgRareAdd = mkSmallBtn(UI.cfgRareSec, "+ ADD", 0, 30, 42, 26, C.Green)
 UI.cfgRareAdd.Position = UDim2.new(1, -90, 0, 30)
 UI.cfgRareAdd.TextColor3 = C.BG
-UI.cfgRareClear = mkSmallBtn(cfgRareSec, "CLEAR", 0, 30, 42, 26, C.Red)
+UI.cfgRareClear = mkSmallBtn(UI.cfgRareSec, "CLEAR", 0, 30, 42, 26, C.Red)
 UI.cfgRareClear.Position = UDim2.new(1, -44, 0, 30)
 
-UI.cfgRareCountLbl = Instance.new("TextLabel", cfgRareSec)
+UI.cfgRareCountLbl = Instance.new("TextLabel", UI.cfgRareSec)
 UI.cfgRareCountLbl.Size = UDim2.new(1, -16, 0, 18)
 UI.cfgRareCountLbl.Position = UDim2.new(0, 8, 0, 58)
 UI.cfgRareCountLbl.BackgroundTransparency = 1
@@ -1358,17 +1346,17 @@ end
 updateRareCount()
 
 -- Section 4: Save/Reset
-local cfgSaveSec, _ = mkCfgSection(UI.cfgFrame, "💾 SAVE / RESET CONFIG", C.Green)
-cfgSaveSec.Size = UDim2.new(1, -8, 0, 80)
+UI.cfgSaveSec, _ = mkCfgSection(UI.cfgFrame, "💾 SAVE / RESET CONFIG", C.Green)
+UI.cfgSaveSec.Size = UDim2.new(1, -8, 0, 80)
 
-UI.cfgSaveBtn = mkSmallBtn(cfgSaveSec, "💾 SAVE ALL", 8, 30, 130, 28, C.Green)
+UI.cfgSaveBtn = mkSmallBtn(UI.cfgSaveSec, "💾 SAVE ALL", 8, 30, 130, 28, C.Green)
 UI.cfgSaveBtn.TextColor3 = C.BG
 UI.cfgSaveBtn.TextSize = 12
-UI.cfgResetBtn = mkSmallBtn(cfgSaveSec, "🔄 RESET DEFAULTS", 0, 30, 150, 28, C.Red)
+UI.cfgResetBtn = mkSmallBtn(UI.cfgSaveSec, "🔄 RESET DEFAULTS", 0, 30, 150, 28, C.Red)
 UI.cfgResetBtn.Position = UDim2.new(1, -158, 0, 30)
 UI.cfgResetBtn.TextSize = 11
 
-UI.cfgStatusLbl = Instance.new("TextLabel", cfgSaveSec)
+UI.cfgStatusLbl = Instance.new("TextLabel", UI.cfgSaveSec)
 UI.cfgStatusLbl.Size = UDim2.new(1, -16, 0, 18)
 UI.cfgStatusLbl.Position = UDim2.new(0, 8, 0, 60)
 UI.cfgStatusLbl.BackgroundTransparency = 1
@@ -1379,13 +1367,13 @@ UI.cfgStatusLbl.TextColor3 = C.TextDim
 UI.cfgStatusLbl.TextXAlignment = Enum.TextXAlignment.Left
 
 -- Section 5: Bot Filters
-local cfgFilterSec, _ = mkCfgSection(UI.cfgFrame, "🎯 BATTLE TYPE FILTER", C.Pink)
-cfgFilterSec.Size = UDim2.new(1, -8, 0, 80)
+UI.cfgFilterSec, _ = mkCfgSection(UI.cfgFrame, "🎯 BATTLE TYPE FILTER", C.Pink)
+UI.cfgFilterSec.Size = UDim2.new(1, -8, 0, 80)
 
-local wildFilterBtn = mkSmallBtn(cfgFilterSec, "Wild: ON", 8, 30, 100, 26, UI.automateWild and C.Wild or C.PanelAlt)
-UI.trainerFilterBtn = mkSmallBtn(cfgFilterSec, "Trainer: ON", 116, 30, 100, 26, UI.automateTrainer and C.Trainer or C.PanelAlt)
+UI.wildFilterBtn = mkSmallBtn(UI.cfgFilterSec, "Wild: ON", 8, 30, 100, 26, UI.automateWild and C.Wild or C.PanelAlt)
+UI.trainerFilterBtn = mkSmallBtn(UI.cfgFilterSec, "Trainer: ON", 116, 30, 100, 26, UI.automateTrainer and C.Trainer or C.PanelAlt)
 
-UI.cfgFilterLbl = Instance.new("TextLabel", cfgFilterSec)
+UI.cfgFilterLbl = Instance.new("TextLabel", UI.cfgFilterSec)
 UI.cfgFilterLbl.Size = UDim2.new(1, -16, 0, 18)
 UI.cfgFilterLbl.Position = UDim2.new(0, 8, 0, 58)
 UI.cfgFilterLbl.BackgroundTransparency = 1
@@ -1398,7 +1386,7 @@ UI.cfgFilterLbl.TextXAlignment = Enum.TextXAlignment.Left
 --==================================================
 -- HEAL TAB FRAME (NEW v4.6)
 --==================================================
-UI.healFrame = Instance.new("ScrollingFrame", contentContainer)
+UI.healFrame = Instance.new("ScrollingFrame", UI.contentContainer)
 UI.healFrame.Size = UDim2.new(1, 0, 1, 0)
 UI.healFrame.BackgroundTransparency = 1
 UI.healFrame.BorderSizePixel = 0
@@ -1510,6 +1498,9 @@ UI.healRemoteLayout = Instance.new("UIListLayout", UI.healRemoteScroll)
 UI.healRemoteLayout.SortOrder = Enum.SortOrder.LayoutOrder
 UI.healRemoteLayout.Padding = UDim.new(0, 2)
 
+UI.healRemoteName = config.healRemoteName or ""
+UI.healRemotePath = config.healRemotePath or ""
+
 -- Section: Selected Heal Remote Display
 UI.healSelectedSec = Instance.new("Frame", UI.healFrame)
 UI.healSelectedSec.Size = UDim2.new(1, -8, 0, 100)
@@ -1601,15 +1592,15 @@ end
 --==================================================
 -- HUNT FRAME
 --==================================================
-local contentFrame = Instance.new("Frame", contentContainer)
+local contentFrame = Instance.new("Frame", contentScrollFrame)
 contentFrame.Name = "HuntFrame"
-contentFrame.Size = UDim2.new(1, 0, 1, 0)
+contentFrame.Size = UDim2.new(1, -6, 0, 1170)
 contentFrame.BackgroundTransparency = 1
 contentFrame.Visible = true
 
 -- TAB SWITCH LOGIC
 local function switchTab(active)
-    local tabs = {hunt=contentFrame, mastery=UI.masteryFrame, heal=UI.healFrame, cfg=UI.cfgFrame}
+    local tabs = {hunt=contentScrollFrame, mastery=UI.masteryFrame, heal=UI.healFrame, cfg=UI.cfgFrame}
     local btns = {hunt=UI.huntTabBtn, mastery=UI.masteryTabBtn, heal=UI.healTabBtn, cfg=UI.cfgTabBtn}
     for name, frame in pairs(tabs) do
         frame.Visible = (name == active)
@@ -2006,6 +1997,7 @@ UI.fastBattleBtn = mkAutoBtn(UI.autoPanel, "FAST BATTLE: OFF", 8, 524, 120)
 UI.infUMVBtn = mkAutoBtn(UI.autoPanel, "INF UMV: OFF", 132, 524, 100)
 UI.skipFishBtn = mkAutoBtn(UI.autoPanel, "SKIP FISH: OFF", 236, 524, 100)
 UI.noUnstuckBtn = mkAutoBtn(UI.autoPanel, "NO UNSTUCK CD: OFF", 8, 550, 140)
+UI.infRepelBtn = mkAutoBtn(UI.autoPanel, "INFINITE REPEL: OFF", 152, 550, 140)
 
 -- GUI Openers
 UI.guiSectionLbl = Instance.new("TextLabel", UI.autoPanel)
@@ -2114,17 +2106,20 @@ local function updateAutoUI()
     UI.noUnstuckBtn.BackgroundColor3 = config.noUnstuck and C.Teal or C.AccentDim
     UI.noUnstuckBtn.Text = config.noUnstuck and "NO UNSTUCK CD: ON" or "NO UNSTUCK CD: OFF"
 
+    UI.infRepelBtn.BackgroundColor3 = config.infiniteRepel and C.Teal or C.AccentDim
+    UI.infRepelBtn.Text = config.infiniteRepel and "INFINITE REPEL: ON" or "INFINITE REPEL: OFF"
+
     local wild_s = autoMode == "off" and "Wild: OFF" or ("Wild: " .. string.upper(autoMode) .. " /" .. autoMoveSlot)
     local trainer_s = trainerAutoMode == "off" and "Trainer: OFF" or ("Trainer: " .. string.upper(trainerAutoMode) .. " /" .. trainerAutoMoveSlot)
     autoStatusLbl.Text = wild_s .. "  |  " .. trainer_s .. (rareFoundPause and "  [⏸ RARE PAUSE]" or "")
 
     -- Update config UI
-    cfgAutoModeVal.Text = autoMode
-    cfgAutoModeVal.TextColor3 = autoMode == "off" and C.Red or C.Green
-    cfgTrainerModeVal.Text = trainerAutoMode
-    cfgTrainerModeVal.TextColor3 = trainerAutoMode == "off" and C.Red or C.Orange
-    cfgWildSlotVal.Text = tostring(autoMoveSlot)
-    cfgTrainerSlotVal.Text = tostring(trainerAutoMoveSlot)
+    UI.cfgAutoModeVal.Text = autoMode
+    UI.cfgAutoModeVal.TextColor3 = autoMode == "off" and C.Red or C.Green
+    UI.cfgTrainerModeVal.Text = trainerAutoMode
+    UI.cfgTrainerModeVal.TextColor3 = trainerAutoMode == "off" and C.Red or C.Orange
+    UI.cfgWildSlotVal.Text = tostring(autoMoveSlot)
+    UI.cfgTrainerSlotVal.Text = tostring(trainerAutoMoveSlot)
 end
 
 -- Wild buttons
@@ -2167,10 +2162,263 @@ end
 
 updateAutoUI()
 
+--==================================================
+-- ALL AUTOMATION BUTTON CLICK HANDLERS
+--==================================================
+
+-- Toggle helper for config boolean buttons
+local function toggleConfigBool(key)
+    config[key] = not config[key]
+    saveConfig()
+    updateAutoUI()
+end
+
+-- Auto Fish
+track(UI.autoFishBtn.MouseButton1Click:Connect(function()
+    toggleConfigBool("autoFishEnabled")
+    sendNotification("LumiWare", "Auto Fish: " .. (config.autoFishEnabled and "ON" or "OFF"), 3)
+    addBattleLog("🎣 Auto Fish: " .. (config.autoFishEnabled and "ON" or "OFF"), config.autoFishEnabled and C.Teal or C.TextDim)
+end))
+addHoverEffect(UI.autoFishBtn, C.AccentDim, C.Teal)
+
+-- Auto Disc Drop
+track(UI.autoDiscBtn.MouseButton1Click:Connect(function()
+    toggleConfigBool("autoDiscEnabled")
+    sendNotification("LumiWare", "Disc Drop: " .. (config.autoDiscEnabled and "ON" or "OFF"), 3)
+    addBattleLog("💿 Disc Drop: " .. (config.autoDiscEnabled and "ON" or "OFF"), config.autoDiscEnabled and C.Teal or C.TextDim)
+end))
+addHoverEffect(UI.autoDiscBtn, C.AccentDim, C.Teal)
+
+-- Server Hop
+track(UI.serverHopBtn.MouseButton1Click:Connect(function()
+    sendNotification("LumiWare", "Server hopping...", 3)
+    pcall(function()
+        game:GetService("TeleportService"):TeleportToPlaceInstance(game.PlaceId, game.JobId)
+    end)
+end))
+addHoverEffect(UI.serverHopBtn, C.AccentDim, C.Accent)
+
+-- Empty Server
+track(UI.emptyServerBtn.MouseButton1Click:Connect(function()
+    sendNotification("LumiWare", "Finding emptiest server...", 3)
+    pcall(function()
+        loadstring(game:HttpGet("https://raw.githubusercontent.com/thedragonslayer2/hey/main/Misc./Find%20the%20most%20empty%20server%20script"))()
+    end)
+end))
+addHoverEffect(UI.emptyServerBtn, C.AccentDim, C.Accent)
+
+-- Mastery Disable
+track(UI.masteryDisableBtn.MouseButton1Click:Connect(function()
+    toggleConfigBool("masteryDisable")
+    sendNotification("LumiWare", "Mastery UI: " .. (config.masteryDisable and "DISABLED" or "ENABLED"), 3)
+end))
+addHoverEffect(UI.masteryDisableBtn, C.AccentDim, C.Teal)
+
+-- Skip Dialogue
+track(UI.autoSkipDialogueBtn.MouseButton1Click:Connect(function()
+    toggleConfigBool("autoSkipDialogue")
+    sendNotification("LumiWare", "Skip Dialogue: " .. (config.autoSkipDialogue and "ON" or "OFF"), 3)
+end))
+addHoverEffect(UI.autoSkipDialogueBtn, C.AccentDim, C.Teal)
+
+-- Deny Move Reassign
+track(UI.autoDenyMoveBtn.MouseButton1Click:Connect(function()
+    toggleConfigBool("autoDenyMove")
+    sendNotification("LumiWare", "Deny Moves: " .. (config.autoDenyMove and "ON" or "OFF"), 3)
+end))
+addHoverEffect(UI.autoDenyMoveBtn, C.AccentDim, C.Teal)
+
+-- Deny Switch
+track(UI.autoDenySwitchBtn.MouseButton1Click:Connect(function()
+    toggleConfigBool("autoDenySwitch")
+    sendNotification("LumiWare", "Deny Switch: " .. (config.autoDenySwitch and "ON" or "OFF"), 3)
+end))
+addHoverEffect(UI.autoDenySwitchBtn, C.AccentDim, C.Teal)
+
+-- Deny Nickname
+track(UI.autoDenyNickBtn.MouseButton1Click:Connect(function()
+    toggleConfigBool("autoDenyNick")
+    sendNotification("LumiWare", "Deny Nick: " .. (config.autoDenyNick and "ON" or "OFF"), 3)
+end))
+addHoverEffect(UI.autoDenyNickBtn, C.AccentDim, C.Teal)
+
+-- Catch Gleam
+track(UI.catchGleamBtn.MouseButton1Click:Connect(function()
+    toggleConfigBool("autoCatchGleam")
+    sendNotification("LumiWare", "Catch Gleam: " .. (config.autoCatchGleam and "ON" or "OFF"), 3)
+end))
+addHoverEffect(UI.catchGleamBtn, C.AccentDim, C.Teal)
+
+-- Catch Gamma
+track(UI.catchGammaBtn.MouseButton1Click:Connect(function()
+    toggleConfigBool("autoCatchGamma")
+    sendNotification("LumiWare", "Catch Gamma: " .. (config.autoCatchGamma and "ON" or "OFF"), 3)
+end))
+addHoverEffect(UI.catchGammaBtn, C.AccentDim, C.Teal)
+
+-- Catch Not Owned
+track(UI.catchNotOwnedBtn.MouseButton1Click:Connect(function()
+    toggleConfigBool("autoCatchNotOwned")
+    sendNotification("LumiWare", "Catch Not Owned: " .. (config.autoCatchNotOwned and "ON" or "OFF"), 3)
+end))
+addHoverEffect(UI.catchNotOwnedBtn, C.AccentDim, C.Teal)
+
+-- Use Spare
+track(UI.catchSpareBtn.MouseButton1Click:Connect(function()
+    toggleConfigBool("autoCatchSpare")
+    sendNotification("LumiWare", "Use Spare: " .. (config.autoCatchSpare and "ON" or "OFF"), 3)
+end))
+addHoverEffect(UI.catchSpareBtn, C.AccentDim, C.Teal)
+
+-- Defeat Corrupt toggle + slot
+track(UI.defeatCorruptBtn.MouseButton1Click:Connect(function()
+    if config.defeatCorruptMove > 0 then
+        config.defeatCorruptMove = 0
+    else
+        config.defeatCorruptMove = 1
+    end
+    saveConfig(); updateAutoUI()
+    sendNotification("LumiWare", "Defeat Corrupt: " .. (config.defeatCorruptMove > 0 and "ON (slot " .. config.defeatCorruptMove .. ")" or "OFF"), 3)
+end))
+addHoverEffect(UI.defeatCorruptBtn, C.AccentDim, C.Teal)
+for s = 1, 4 do
+    track(UI.defeatCorruptSlotBtns[s].MouseButton1Click:Connect(function()
+        config.defeatCorruptMove = s; saveConfig(); updateAutoUI()
+    end))
+    addHoverEffect(UI.defeatCorruptSlotBtns[s], C.PanelAlt, C.AccentDim)
+end
+
+-- Auto Rally
+track(UI.autoRallyBtn.MouseButton1Click:Connect(function()
+    toggleConfigBool("autoRally")
+    sendNotification("LumiWare", "Auto Rally: " .. (config.autoRally and "ON" or "OFF"), 3)
+end))
+addHoverEffect(UI.autoRallyBtn, C.AccentDim, C.Teal)
+
+-- Rally Keep Gleam
+track(UI.rallyKeepGleamBtn.MouseButton1Click:Connect(function()
+    toggleConfigBool("rallyKeepGleam")
+    sendNotification("LumiWare", "Rally Keep Gleam: " .. (config.rallyKeepGleam and "ON" or "OFF"), 3)
+end))
+addHoverEffect(UI.rallyKeepGleamBtn, C.AccentDim, C.Teal)
+
+-- Rally Keep SA
+track(UI.rallyKeepHABtn.MouseButton1Click:Connect(function()
+    toggleConfigBool("rallyKeepHA")
+    sendNotification("LumiWare", "Rally Keep S.A.: " .. (config.rallyKeepHA and "ON" or "OFF"), 3)
+end))
+addHoverEffect(UI.rallyKeepHABtn, C.AccentDim, C.Teal)
+
+-- Auto Encounter
+track(UI.autoEncounterBtn.MouseButton1Click:Connect(function()
+    toggleConfigBool("autoEncounter")
+    sendNotification("LumiWare", "Auto Encounter: " .. (config.autoEncounter and "ON" or "OFF"), 3)
+    addBattleLog("🏃 Auto Encounter: " .. (config.autoEncounter and "ON" or "OFF"), config.autoEncounter and C.Green or C.TextDim)
+end))
+addHoverEffect(UI.autoEncounterBtn, C.AccentDim, C.Green)
+
+-- Fast Battle
+track(UI.fastBattleBtn.MouseButton1Click:Connect(function()
+    toggleConfigBool("fastBattle")
+    sendNotification("LumiWare", "Fast Battle: " .. (config.fastBattle and "ON" or "OFF"), 3)
+end))
+addHoverEffect(UI.fastBattleBtn, C.AccentDim, C.Teal)
+
+-- Infinite UMV
+track(UI.infUMVBtn.MouseButton1Click:Connect(function()
+    toggleConfigBool("infUMV")
+    sendNotification("LumiWare", "Infinite UMV: " .. (config.infUMV and "ON" or "OFF"), 3)
+end))
+addHoverEffect(UI.infUMVBtn, C.AccentDim, C.Teal)
+
+-- Skip Fish Minigame
+track(UI.skipFishBtn.MouseButton1Click:Connect(function()
+    toggleConfigBool("skipFish")
+    sendNotification("LumiWare", "Skip Fish: " .. (config.skipFish and "ON" or "OFF"), 3)
+end))
+addHoverEffect(UI.skipFishBtn, C.AccentDim, C.Teal)
+
+-- No Unstuck Cooldown
+track(UI.noUnstuckBtn.MouseButton1Click:Connect(function()
+    toggleConfigBool("noUnstuck")
+    sendNotification("LumiWare", "No Unstuck CD: " .. (config.noUnstuck and "ON" or "OFF"), 3)
+end))
+addHoverEffect(UI.noUnstuckBtn, C.AccentDim, C.Teal)
+
+-- Infinite Repel
+track(UI.infRepelBtn.MouseButton1Click:Connect(function()
+    toggleConfigBool("infiniteRepel")
+    sendNotification("LumiWare", "Infinite Repel: " .. (config.infiniteRepel and "ON" or "OFF"), 3)
+end))
+addHoverEffect(UI.infRepelBtn, C.AccentDim, C.Teal)
+
+-- GUI Opener: Open PC
+track(UI.openPCBtn.MouseButton1Click:Connect(function()
+    pcall(function()
+        if gameAPI and gameAPI.Menu and gameAPI.Menu.pc then
+            gameAPI.Menu.pc:bootUp()
+            sendNotification("LumiWare", "PC opened", 3)
+        else
+            sendNotification("LumiWare", "Game API not ready", 3)
+        end
+    end)
+end))
+addHoverEffect(UI.openPCBtn, C.AccentDim, C.Cyan)
+
+-- GUI Opener: Open Shop
+track(UI.openShopBtn.MouseButton1Click:Connect(function()
+    pcall(function()
+        if gameAPI and gameAPI.Menu and gameAPI.Menu.shop then
+            gameAPI.Menu:disable()
+            gameAPI.Menu.shop:open()
+            gameAPI.Menu:enable()
+            sendNotification("LumiWare", "Shop opened", 3)
+        else
+            sendNotification("LumiWare", "Game API not ready", 3)
+        end
+    end)
+end))
+addHoverEffect(UI.openShopBtn, C.AccentDim, C.Cyan)
+
+-- GUI Opener: Open Rally Team
+track(UI.openRallyTeamBtn.MouseButton1Click:Connect(function()
+    pcall(function()
+        if gameAPI and gameAPI.Menu and gameAPI.Menu.rally then
+            gameAPI.Menu:disable()
+            gameAPI.Menu.rally:openRallyTeamMenu()
+            gameAPI.Menu:enable()
+            sendNotification("LumiWare", "Rally Team opened", 3)
+        else
+            sendNotification("LumiWare", "Game API not ready", 3)
+        end
+    end)
+end))
+addHoverEffect(UI.openRallyTeamBtn, C.AccentDim, C.Cyan)
+
+-- GUI Opener: Open Rallied
+track(UI.openRalliedBtn.MouseButton1Click:Connect(function()
+    pcall(function()
+        if gameAPI and gameAPI.Menu and gameAPI.Menu.rally then
+            local rStatus = gameAPI.Network:get("PDS", "ranchStatus")
+            if rStatus and rStatus.rallied and rStatus.rallied > 0 then
+                gameAPI.Menu:disable()
+                gameAPI.Menu.rally:openRalliedMonstersMenu()
+                gameAPI.Menu:enable()
+                sendNotification("LumiWare", "Rallied menu opened", 3)
+            else
+                sendNotification("LumiWare", "No rallied Loomians", 3)
+            end
+        else
+            sendNotification("LumiWare", "Game API not ready", 3)
+        end
+    end)
+end))
+addHoverEffect(UI.openRalliedBtn, C.AccentDim, C.Cyan)
+
 -- BATTLE LOG
 local blPanel = Instance.new("Frame", contentFrame)
 blPanel.Size = UDim2.new(1, 0, 0, 100)
-blPanel.Position = UDim2.new(0, 0, 0, 486)
+blPanel.Position = UDim2.new(0, 0, 0, 1016)
 blPanel.BackgroundColor3 = C.Panel
 blPanel.BorderSizePixel = 0
 Instance.new("UICorner", blPanel).CornerRadius = UDim.new(0, 8)
@@ -2220,7 +2468,7 @@ end
 -- CONTROLS
 UI.ctrlPanel = Instance.new("Frame", contentFrame)
 UI.ctrlPanel.Size = UDim2.new(1, 0, 0, 36)
-UI.ctrlPanel.Position = UDim2.new(0, 0, 0, 592)
+UI.ctrlPanel.Position = UDim2.new(0, 0, 0, 1122)
 UI.ctrlPanel.BackgroundColor3 = C.Panel
 UI.ctrlPanel.BorderSizePixel = 0
 Instance.new("UICorner", UI.ctrlPanel).CornerRadius = UDim.new(0, 8)
@@ -2270,15 +2518,15 @@ end))
 
 -- MINIMIZE
 local fullSize = UDim2.fromOffset(480, 740)
-track(minBtn.MouseButton1Click:Connect(function()
+track(UI.minBtn.MouseButton1Click:Connect(function()
     isMinimized = not isMinimized
     if isMinimized then
         TweenService:Create(mainFrame, TweenInfo.new(0.25, Enum.EasingStyle.Quint), {Size = UDim2.fromOffset(480, 36)}):Play()
-        contentContainer.Visible = false; tabBar.Visible = false; minBtn.Text = "+"
+        UI.contentContainer.Visible = false; UI.tabBar.Visible = false; UI.minBtn.Text = "+"
     else
-        contentContainer.Visible = true; tabBar.Visible = true
+        UI.contentContainer.Visible = true; UI.tabBar.Visible = true
         TweenService:Create(mainFrame, TweenInfo.new(0.25, Enum.EasingStyle.Quint), {Size = fullSize}):Play()
-        minBtn.Text = "–"
+        UI.minBtn.Text = "–"
     end
 end))
 
@@ -2286,17 +2534,17 @@ end))
 -- CONFIG TAB LOGIC
 --==================================================
 local function refreshConfigUI()
-    cfgAutoModeVal.Text = autoMode
-    cfgAutoModeVal.TextColor3 = autoMode == "off" and C.Red or C.Green
-    cfgTrainerModeVal.Text = trainerAutoMode
-    cfgTrainerModeVal.TextColor3 = trainerAutoMode == "off" and C.Red or C.Orange
-    cfgWildSlotVal.Text = tostring(autoMoveSlot)
-    cfgTrainerSlotVal.Text = tostring(trainerAutoMoveSlot)
-    cfgHealVal.Text = autoHealEnabled and "ON" or "OFF"
-    cfgHealVal.TextColor3 = autoHealEnabled and C.Teal or C.TextDim
-    cfgThreshVal.Text = tostring(autoHealThreshold) .. "%"
-    wildFilterBtn.BackgroundColor3 = UI.automateWild and C.Wild or C.PanelAlt
-    wildFilterBtn.Text = UI.automateWild and "Wild: ON" or "Wild: OFF"
+    UI.cfgAutoModeVal.Text = autoMode
+    UI.cfgAutoModeVal.TextColor3 = autoMode == "off" and C.Red or C.Green
+    UI.cfgTrainerModeVal.Text = trainerAutoMode
+    UI.cfgTrainerModeVal.TextColor3 = trainerAutoMode == "off" and C.Red or C.Orange
+    UI.cfgWildSlotVal.Text = tostring(autoMoveSlot)
+    UI.cfgTrainerSlotVal.Text = tostring(trainerAutoMoveSlot)
+    UI.cfgHealVal.Text = autoHealEnabled and "ON" or "OFF"
+    UI.cfgHealVal.TextColor3 = autoHealEnabled and C.Teal or C.TextDim
+    UI.cfgThreshVal.Text = tostring(autoHealThreshold) .. "%"
+    UI.wildFilterBtn.BackgroundColor3 = UI.automateWild and C.Wild or C.PanelAlt
+    UI.wildFilterBtn.Text = UI.automateWild and "Wild: ON" or "Wild: OFF"
     UI.trainerFilterBtn.BackgroundColor3 = UI.automateTrainer and C.Trainer or C.PanelAlt
     UI.trainerFilterBtn.Text = UI.automateTrainer and "Trainer: ON" or "Trainer: OFF"
     updateRareCount()
@@ -2367,11 +2615,11 @@ UI.cfgResetBtn.MouseButton1Click:Connect(function()
     sendNotification("LumiWare", "Config reset to defaults.", 4)
 end)
 
-wildFilterBtn.MouseButton1Click:Connect(function()
+UI.wildFilterBtn.MouseButton1Click:Connect(function()
     UI.automateWild = not UI.automateWild
     config.automateWild = UI.automateWild
-    wildFilterBtn.BackgroundColor3 = UI.automateWild and C.Wild or C.PanelAlt
-    wildFilterBtn.Text = UI.automateWild and "Wild: ON" or "Wild: OFF"
+    UI.wildFilterBtn.BackgroundColor3 = UI.automateWild and C.Wild or C.PanelAlt
+    UI.wildFilterBtn.Text = UI.automateWild and "Wild: ON" or "Wild: OFF"
 end)
 UI.trainerFilterBtn.MouseButton1Click:Connect(function()
     UI.automateTrainer = not UI.automateTrainer
@@ -2659,7 +2907,7 @@ UI.healMonitorThread = task.spawn(function()
             -- Check player's active Loomian HP from battle data (if available)
             if currentBattle.playerStats and currentBattle.playerStats.hp and currentBattle.playerStats.maxHP then
                 local pct = (currentBattle.playerStats.hp / currentBattle.playerStats.maxHP) * 100
-                if pct < autoHealThreshold and (tick() - lastHealTime) > UI.healCooldown then
+                if pct < autoHealThreshold and (tick() - lastHealTime) > healCooldown then
                     addHealLog(string.format("⚠ HP low (%.0f%%) — auto-healing!", pct), C.Orange)
                     performHeal()
                 end
@@ -3312,12 +3560,12 @@ local function processBattleCommands(commandTable)
             if cmdL == "faint" then
                 if type(entry[2]) == "string" and string.find(entry[2], "p2") then
                     sessionKOs = sessionKOs + 1
-                    sessionLbl.Text = string.format("Session: %d KOs | %.1fk Damage", sessionKOs, sessionDamage / 1000)
+                    UI.sessionLbl.Text = string.format("Session: %d KOs | %.1fk Damage", sessionKOs, sessionDamage / 1000)
                 end
             elseif cmdL == "-damage" or cmdL == "damage" then
                 if type(entry[2]) == "string" and string.find(entry[2], "p2") then
                     sessionDamage = sessionDamage + 100
-                    sessionLbl.Text = string.format("Session: %d KOs | %.1fk Damage", sessionKOs, sessionDamage / 1000)
+                    UI.sessionLbl.Text = string.format("Session: %d KOs | %.1fk Damage", sessionKOs, sessionDamage / 1000)
                 end
             end
         end
@@ -3760,43 +4008,37 @@ task.spawn(function()
                 end
                 
                 if config.autoSkipDialogue then
-                    -- Filter out manual input waits
+                    -- Filter out non-essential dialogue strings (skip instantly)
                     local newArgs = {}
-                    local forceSkip = false
-                    for _, v in pairs(args) do
+                    local hasInteractive = false
+                    for _, v in ipairs(args) do
                         if type(v) ~= "string" then
                             table.insert(newArgs, v)
                         else
                             local vLower = v:lower()
                             if vLower:sub(1,5) == "[y/n]" then
                                 table.insert(newArgs, v)
-                                forceSkip = true
+                                hasInteractive = true
                             elseif vLower:sub(1,9) == "[gamepad]" then
+                                -- Strip gamepad prefix but keep the text
                                 table.insert(newArgs, v:sub(10))
                             elseif vLower:sub(1,4) == "[ma]" or vLower:sub(1,5) == "[pma]" then
                                 table.insert(newArgs, v)
-                                forceSkip = true
-                            else
-                                table.insert(newArgs, v)
+                                hasInteractive = true
                             end
+                            -- Other plain strings are skipped (not added to newArgs)
                         end
                     end
                     
-                    if forceSkip then
-                        return true
+                    if not hasInteractive then
+                        -- No interactive elements, skip the entire dialogue
+                        return
                     end
                     args = newArgs
                 end
             end
             
-            if config.autoSkipDialogue then
-                -- Automatically fire the UI skip sequence if possible inside the game's internal thread
-                task.spawn(function()
-                    task.wait()
-                    if getthreadcontext then getthreadcontext() end
-                end)
-            end
-            
+            setThreadContext(2)
             return original(unpack(args))
         end
     end
@@ -3811,49 +4053,67 @@ end)
 
 
 --------------------------------------------------------------------------------
--- AUTO RALLY MODULE
+-- AUTO RALLY MODULE (ported from original handleRallied approach)
 --------------------------------------------------------------------------------
 task.spawn(function()
     while not gameAPI do task.wait() end
     
-    local oldRally = nil
-    if gameAPI.Menu and gameAPI.Menu.rally and gameAPI.Menu.rally.updateNPCBubble then
-        oldRally = gameAPI.Menu.rally.updateNPCBubble
-        
-        gameAPI.Menu.rally.updateNPCBubble = function(...)
-            if config.autoRally then
-                pcall(function()
-                    if gameAPI.Network then
-                        local rallyInfo = gameAPI.Network:get("Rally", "GetInfo")
-                        if rallyInfo and rallyInfo.stats and rallyInfo.stats.monsters then
-                            local rCount = 0
-                            for _, mon in pairs(rallyInfo.stats.monsters) do
-                                rCount = rCount + 1
-                                local keep = false
-                                if config.autoRallyAll then
-                                    keep = true
-                                elseif config.rallyKeepGleam and (mon.gl == 1 or mon.gl == 2 or mon.gl == "1" or mon.gl == "2" or mon.gl == true) then
-                                    keep = true
-                                elseif config.rallyKeepHA and (mon.sa == true or mon.sa == 1 or mon.sa == "1") then
-                                    keep = true
-                                end
-                                
-                                -- Example claim logic (porting the underlying concept)
-                                if keep then
-                                    log("RALLY", "Successfully auto-rallied a valid kept Loomian.")
-                                    gameAPI.Network:post("Rally", "Claim", mon.id)
-                                else
-                                    gameAPI.Network:post("Rally", "Discard", mon.id)
-                                end
-                            end
-                            gameAPI.Menu.rally.ralliedCount = rCount
+    -- Continuously check for rallied Loomians
+    task.spawn(function()
+        while task.wait(3) do
+            pcall(function()
+                if not config.autoRally or not gameAPI then return end
+                
+                local ralliedData = gameAPI.Network:get("PDS", "getRallied")
+                if not ralliedData or not ralliedData.monsters or not ralliedData.monsters[1] then return end
+                
+                local decisions = {}
+                
+                for idx, mon in pairs(ralliedData.monsters) do
+                    -- Count max IVs (6 = perfect 40)
+                    local maxIVCount = 0
+                    if mon.summ and mon.summ.ivr then
+                        for _, iv in pairs(mon.summ.ivr) do
+                            if iv == 6 then maxIVCount = maxIVCount + 1 end
                         end
                     end
-                end)
-            end
-            if oldRally then return oldRally(...) end
+                    
+                    local keep = false
+                    
+                    -- Keep gleaming
+                    if config.rallyKeepGleam and mon.gl then
+                        keep = true
+                    end
+                    
+                    -- Keep hidden ability
+                    if config.rallyKeepHA and mon.sa then
+                        keep = true
+                    end
+                    
+                    -- Decision: 2 = keep, 1 = release
+                    decisions[idx] = keep and 2 or 1
+                end
+                
+                -- Submit decisions
+                local result = gameAPI.Network:get("PDS", "handleRallied", decisions)
+                if result then
+                    if gameAPI.Menu.rally.ralliedCount then
+                        gameAPI.Menu.rally.ralliedCount = result
+                    end
+                    if gameAPI.Menu.rally.updateNPCBubble then
+                        gameAPI.Menu.rally.updateNPCBubble(result)
+                    end
+                end
+                
+                -- Show mastery if included
+                if ralliedData.mastery and gameAPI.Menu.mastery then
+                    pcall(function()
+                        gameAPI.Menu.mastery:showProgressUpdate(ralliedData.mastery, false)
+                    end)
+                end
+            end)
         end
-    end
+    end)
 end)
 
 
@@ -3864,21 +4124,51 @@ end)
 task.spawn(function()
     while not gameAPI do task.wait() end
     
-    -- Dynamically extract the onStepTaken function from closures
+    -- Extract onStepTaken from WalkEvents.beginLoop upvalues (matching original approach)
     local stepFunction = nil
-    for _, fn in pairs(getgc(true)) do
-        if type(fn) == "function" and debug.getinfo(fn).name == "onStepTaken" then
-            stepFunction = fn
-            break
+    pcall(function()
+        if gameAPI.WalkEvents and gameAPI.WalkEvents.beginLoop then
+            local getInfo = debug.getinfo or (getgenv and getgenv().getinfo)
+            if getupvalues then
+                local upvals = getupvalues(gameAPI.WalkEvents.beginLoop)
+                if type(upvals) == "table" then
+                    for _, v in pairs(upvals) do
+                        if type(v) == "function" and getInfo then
+                            local info = getInfo(v)
+                            if info and info.name == "onStepTaken" then
+                                stepFunction = v
+                                break
+                            end
+                        end
+                    end
+                end
+            end
         end
+    end)
+    
+    if stepFunction then
+        log("ENCOUNTER", "Successfully extracted onStepTaken function")
+    else
+        log("ENCOUNTER", "Could not find onStepTaken — auto encounter unavailable")
     end
     
     task.spawn(function()
         while task.wait(0.1) do
             pcall(function()
-                if config.autoEncounter and stepFunction then
-                    if gameAPI.MasterControl.WalkEnabled and gameAPI.Menu.enabled and not (currentBattle and currentBattle.active) then
-                        stepFunction(true)
+                if config.autoEncounter and stepFunction and gameAPI then
+                    if gameAPI.MasterControl.WalkEnabled
+                        and gameAPI.Menu.enabled
+                        and not (currentBattle and currentBattle.active)
+                        and gameAPI.PlayerData.completedEvents.ChooseBeginner then
+                        -- Check health before encounter (matching original vu25 logic)
+                        local canEncounter = true
+                        if config.autoHealEnabled then
+                            local fullHP = gameAPI.Network:get("PDS", "areFullHealth")
+                            if not fullHP then canEncounter = false end
+                        end
+                        if canEncounter then
+                            stepFunction(true)
+                        end
                     end
                 end
             end)
@@ -3894,32 +4184,38 @@ end)
 task.spawn(function()
     while not gameAPI do task.wait() end
 
-    -- Background enforcer loop
+    -- Background enforcer loop for exploits
+    local fishHooked = false
     task.spawn(function()
         while task.wait(0.5) do
             pcall(function()
-                if config.skipFish and gameAPI.Fishing and gameAPI.Fishing.FishMiniGame then
-                    if not _G.oldFishMini then _G.oldFishMini = gameAPI.Fishing.FishMiniGame end
+                -- Skip Fish Minigame (hook once, check config dynamically)
+                if not fishHooked and gameAPI.Fishing and gameAPI.Fishing.FishMiniGame then
+                    local origFishMini = gameAPI.Fishing.FishMiniGame
                     gameAPI.Fishing.FishMiniGame = function(...)
                         if config.skipFish then
-                            return "Success!", 100, "Perfect!" -- Example typical minigame return bypass
+                            -- Skip the minigame and return a successful catch
+                            return 0.9, gameAPI.Network:get("PDS", "fshchi", nil), nil
                         end
-                        return _G.oldFishMini(...)
+                        return origFishMini(...)
                     end
+                    fishHooked = true
                 end
                 
+                -- Unstuck cooldown removal is already handled in gameAPI init,
+                -- but re-enforce in case it gets overwritten
                 if config.noUnstuck and gameAPI.Menu and gameAPI.Menu.options then
-                    if gameAPI.Menu.options.resetLastUnstuckTick ~= _G.emptyUnstuckFn then
-                        _G.emptyUnstuckFn = function() end
-                        gameAPI.Menu.options.resetLastUnstuckTick = _G.emptyUnstuckFn
-                    end
+                    gameAPI.Menu.options.resetLastUnstuckTick = function() end
                 end
                 
+                -- Infinite UMV energy
                 if config.infUMV then
-                    pcall(function() workspace.Camera.UMV.Energy.Value = math.huge end)
                     pcall(function()
-                        local umvMod = require(game.ReplicatedStorage.UMV)
-                        umvMod.Energy = math.huge
+                        local mining = gameAPI.DataManager:getModule("Mining")
+                        if mining then
+                            mining.DecrementBattery = function() end
+                            mining.SetBattery = function() end
+                        end
                     end)
                 end
             end)
@@ -3927,30 +4223,109 @@ task.spawn(function()
     end)
     
     -- Fast Battle Hook (Animations speedup)
+    -- The original uses specific parameter indices for the battle object.
+    -- BattleClientSprite functions use parameter index 1 (self) which has .battle
+    -- BattleClientSide functions use parameter index 1 (self) which has .battle
     pcall(function()
-        local function hookAnim(tbl, propName)
+        local function hookAnimWithBattleIdx(tbl, propName, battleParamIdx)
             if tbl and tbl[propName] then
                 local old = tbl[propName]
                 tbl[propName] = function(...)
+                    setThreadContext(2)
                     local args = {...}
-                    if config.fastBattle then
-                        -- fastForward is a standard gameAPI battle property that bypasses waiting
-                        -- We inject this prop on the incoming battle table parameter
-                        pcall(function() args[1].battle.fastForward = true end)
+                    local battleObj = nil
+                    pcall(function()
+                        if args[battleParamIdx] and args[battleParamIdx].battle then
+                            battleObj = args[battleParamIdx].battle
+                        end
+                    end)
+                    if config.fastBattle and battleObj then
+                        battleObj.fastForward = true
                     end
                     local ret = {old(unpack(args))}
-                    if config.fastBattle then pcall(function() args[1].battle.fastForward = false end) end
+                    if battleObj then
+                        battleObj.fastForward = false
+                    end
                     return unpack(ret)
                 end
             end
         end
 
-        local bs = gameAPI.BattleClientSide
-        local anims = {"switchOut", "faint", "swapTo", "dragIn"}
-        for _, v in pairs(anims) do hookAnim(bs, v) end
-        
+        -- BattleClientSprite: these functions have the battle holder at specific indices
         local bc = gameAPI.BattleClientSprite
-        local sAnims = {"animFaint", "animSummon", "animUnsummon", "monsterIn", "monsterOut", "animEmulate", "animScapegoat", "animRecolor"}
-        for _, v in pairs(sAnims) do hookAnim(bc, v) end
+        if bc then
+            local spriteAnims = {
+                {name = "animFaint", idx = 1},
+                {name = "animSummon", idx = 1},
+                {name = "animUnsummon", idx = 1},
+                {name = "monsterIn", idx = 1},
+                {name = "monsterOut", idx = 1},
+                {name = "animEmulate", idx = 1},
+                {name = "animScapegoat", idx = 1},
+                {name = "animScapegoatFade", idx = 1},
+                {name = "animRecolor", idx = 1},
+            }
+            for _, animInfo in ipairs(spriteAnims) do
+                hookAnimWithBattleIdx(bc, animInfo.name, animInfo.idx)
+            end
+        end
+        
+        -- BattleClientSide: same pattern
+        local bs = gameAPI.BattleClientSide
+        if bs then
+            local sideAnims = {
+                {name = "switchOut", idx = 1},
+                {name = "faint", idx = 1},
+                {name = "swapTo", idx = 1},
+                {name = "dragIn", idx = 1},
+            }
+            for _, animInfo in ipairs(sideAnims) do
+                hookAnimWithBattleIdx(bs, animInfo.name, animInfo.idx)
+            end
+        end
+        
+        -- Hook BattleGui animations (these should be skipped entirely during fast battle)
+        local bgui = gameAPI.BattleGui
+        if bgui then
+            local guiAnims = {"animWeather", "animStatus", "animAbility", "animBoost", "animHit", "animMove"}
+            for _, animName in ipairs(guiAnims) do
+                if bgui[animName] then
+                    local orig = bgui[animName]
+                    bgui[animName] = function(...)
+                        setThreadContext(2)
+                        if config.fastBattle then return end
+                        return orig(...)
+                    end
+                end
+            end
+        end
+        
+        -- Hook setCameraIfLookingAway
+        if bgui and bgui.setCameraIfLookingAway then
+            local origCam = bgui.setCameraIfLookingAway
+            bgui.setCameraIfLookingAway = function(self, battleObj, ...)
+                if config.fastBattle and battleObj then
+                    battleObj.fastForward = true
+                end
+                local ret = {origCam(self, battleObj, ...)}
+                if battleObj then battleObj.fastForward = false end
+                return unpack(ret)
+            end
+        end
+        
+        -- Hook setFillbarRatio for instant HP bars during fast battle
+        if gameAPI.RoundedFrame and gameAPI.RoundedFrame.setFillbarRatio then
+            local origFillbar = gameAPI.RoundedFrame.setFillbarRatio
+            gameAPI.RoundedFrame.setFillbarRatio = function(...)
+                local args = {...}
+                if config.fastBattle then
+                    -- Disable animation on the fillbar (arg 3 = animate flag)
+                    args[3] = false
+                end
+                return origFillbar(unpack(args))
+            end
+        end
+        
+        log("HOOK", "Fast battle animations hooked successfully")
     end)
 end)
