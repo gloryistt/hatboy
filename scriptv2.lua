@@ -308,8 +308,14 @@ local function gatherTablesFromGCEnv()
     local objCount, funcCount, tableCount, envCount = 0, 0, 0, 0
     local seenEnv = {}
     
+    local defaultEnv = getfenv(0)
     for _, obj in ipairs(gc) do
         objCount = objCount + 1
+        
+        -- Yield every 500 objects to prevent script timeout
+        if objCount % 500 == 0 then
+            task.wait()
+        end
         
         -- Direct tables (some executors do return them)
         if type(obj) == "table" then
@@ -323,7 +329,7 @@ local function gatherTablesFromGCEnv()
             pcall(function()
                 local env = getfenv(obj)
                 if type(env) == "table" and not seenEnv[env] 
-                   and env ~= _G and env ~= getfenv(0) then
+                   and env ~= _G and env ~= defaultEnv then
                     seenEnv[env] = true
                     envCount = envCount + 1
                     tbls[#tbls+1] = env
@@ -414,7 +420,18 @@ local function gatherTablesFromConnections()
     return tbls
 end
 
--- Strategy C: require() all ModuleScripts from known services
+-- Strategy C: require() ONLY known game module names (safe — avoids triggering slow scripts)
+-- Only require modules whose Name matches a known game module to avoid execution timeouts.
+local KNOWN_MODULE_NAMES = {
+    "Battle", "Network", "Menu", "DataManager", "BattleGui", "Utilities",
+    "GameSettings", "PlayerData", "SoundManager", "AnimationManager",
+    "Dialogue", "Map", "Encounter", "Fishing", "Mastery", "AutoBattle",
+    "GameController", "Client", "ClientModule", "MainModule",
+    "SharedModule", "GameModule", "BattleModule", "UIModule",
+}
+local knownLookup = {}
+for _, n in ipairs(KNOWN_MODULE_NAMES) do knownLookup[n] = true; knownLookup[n:lower()] = true end
+
 local function gatherTablesFromRequire()
     local tbls = {}
     local ok2, err2 = pcall(function()
@@ -424,13 +441,11 @@ local function gatherTablesFromRequire()
         local services = {}
         pcall(function() services[#services+1] = game:GetService("ReplicatedStorage") end)
         pcall(function() services[#services+1] = game:GetService("ReplicatedFirst") end)
-        pcall(function() services[#services+1] = game:GetService("StarterPlayer") end)
-        pcall(function() services[#services+1] = game:GetService("StarterGui") end)
         
         for _, svc in ipairs(services) do
             pcall(function()
                 for _, child in ipairs(svc:GetDescendants()) do
-                    if child:IsA("ModuleScript") then
+                    if child:IsA("ModuleScript") and knownLookup[child.Name] then
                         moduleCount = moduleCount + 1
                         pcall(function()
                             local mod = require(child)
@@ -450,13 +465,13 @@ local function gatherTablesFromRequire()
                 end
             end)
         end
-        log("API", "Require: " .. moduleCount .. " modules, " .. successCount .. " success → " .. #tbls .. " tables")
+        log("API", "Require: " .. moduleCount .. " known modules, " .. successCount .. " success → " .. #tbls .. " tables")
     end)
     if not ok2 then log("API", "Require scan error: " .. tostring(err2)) end
     return tbls
 end
 
--- Strategy D: getscripts/getrunningscripts → require ModuleScripts
+-- Strategy D: getscripts/getrunningscripts → require ONLY known-name ModuleScripts
 local function gatherTablesFromScripts()
     local tbls = {}
     local scriptFunc = HAS.getscripts or HAS.getrunningscripts
@@ -470,7 +485,8 @@ local function gatherTablesFromScripts()
         local count, successCount = 0, 0
         for _, scr in ipairs(scripts) do
             pcall(function()
-                if typeof(scr) == "Instance" and scr:IsA("ModuleScript") then
+                if typeof(scr) == "Instance" and scr:IsA("ModuleScript")
+                   and knownLookup[scr.Name] then
                     count = count + 1
                     pcall(function()
                         local mod = require(scr)
@@ -489,13 +505,13 @@ local function gatherTablesFromScripts()
                 end
             end)
         end
-        log("API", "Scripts: " .. count .. " ModuleScripts, " .. successCount .. " success → " .. #tbls .. " tables")
+        log("API", "Scripts: " .. count .. " known ModuleScripts, " .. successCount .. " success → " .. #tbls .. " tables")
     end)
     if not ok2 then log("API", "Scripts scan error: " .. tostring(err2)) end
     return tbls
 end
 
--- Strategy E: getnilinstances / getinstances → find ModuleScripts
+-- Strategy E: getnilinstances / getinstances → find ONLY known-name ModuleScripts
 local function gatherTablesFromInstances()
     local tbls = {}
     
@@ -523,7 +539,8 @@ local function gatherTablesFromInstances()
         
         for _, inst in ipairs(allInsts) do
             pcall(function()
-                if typeof(inst) == "Instance" and inst:IsA("ModuleScript") then
+                if typeof(inst) == "Instance" and inst:IsA("ModuleScript")
+                   and knownLookup[inst.Name] then
                     count = count + 1
                     pcall(function()
                         local mod = require(inst)
@@ -692,18 +709,35 @@ task.spawn(function()
     while not gameAPI do
         attempts = attempts + 1
         
-        -- Run ALL strategies every attempt (they're all fast and pcall-protected)
+        -- Run safe strategies every attempt; require-based ones only after attempt 3
         local sources = {}
         sources[#sources+1] = gatherTablesFromGCEnv()        -- A: getgc+getfenv (primary)
         sources[#sources+1] = gatherTablesFromConnections()   -- B: connections+getfenv
-        sources[#sources+1] = gatherTablesFromRequire()       -- C: require ModuleScripts
-        sources[#sources+1] = gatherTablesFromScripts()       -- D: getscripts+require
-        sources[#sources+1] = gatherTablesFromInstances()     -- E: getinstances+require
         sources[#sources+1] = gatherTablesFromRegistry()      -- F: debug.getregistry+getfenv
+        
+        -- Require-based strategies only after attempt 3 (they can be slow)
+        if attempts >= 3 then
+            sources[#sources+1] = gatherTablesFromRequire()       -- C: require known modules
+            sources[#sources+1] = gatherTablesFromScripts()       -- D: getscripts+require known
+            sources[#sources+1] = gatherTablesFromInstances()     -- E: getinstances+require known
+        end
         
         -- Deduplicate and expand
         local allTables = deduplicateAndExpand(sources)
         log("API", "Attempt " .. attempts .. ": " .. #allTables .. " unique tables collected")
+        
+        -- Log scoring info on early attempts for debugging
+        if attempts <= 2 then
+            local bestScore2 = 0
+            local bestKeys2 = {}
+            for _, t in ipairs(allTables) do
+                local s2, m2 = scoreSharedTable(t)
+                if s2 > bestScore2 then bestScore2 = s2; bestKeys2 = m2 end
+            end
+            if bestScore2 > 0 then
+                log("API", "  Best score so far: " .. bestScore2 .. " keys=[" .. table.concat(bestKeys2, ", ") .. "]")
+            end
+        end
         
         -- STRATEGY 1: Classic shared table (rawget Utilities)
         for _, t in ipairs(allTables) do
@@ -1235,7 +1269,7 @@ if config.autoDiscEnabled then
             task.spawn(function()
                 while config.autoDiscEnabled and task.wait() do
                     pcall(function()
-                        if gameAPI.ArcadeController.playing and getGui() and getGui().gui.GridFrame:IsDescendantOf(client.PlayerGui) then
+                        if gameAPI.ArcadeController.playing and getGui() and getGui().gui.GridFrame:IsDescendantOf(player.PlayerGui) then
                             if getGui().gameEnded then
                                 getGui():CleanUp()
                                 getGui():new()
@@ -1297,18 +1331,22 @@ local function performGameAPIHeal()
     if fullHealth then return end
     
     -- Extra safety: don't heal during battle
+    local inBattle = false
     pcall(function()
         if gameAPI.Battle and gameAPI.Battle.currentBattle then
-            return
+            inBattle = true
         end
     end)
+    if inBattle then return end
     
     -- Extra safety: don't heal if walk is disabled (already in a cutscene/menu)
+    local inCutscene = false
     pcall(function()
         if not gameAPI.MasterControl.WalkEnabled or not gameAPI.Menu.enabled then
-            return
+            inCutscene = true
         end
     end)
+    if inCutscene then return end
     
     log("HEAL", "Attempting gameAPI-based heal sequence...")
     isAutoHealing = true
@@ -4512,7 +4550,7 @@ local timerThread = task.spawn(function()
         timerVal.Text = formatTime(elapsed)
         local minutes = elapsed / 60
         if minutes > 0 then epmVal.Text = string.format("%.1f", UI.encounterCount / minutes) end
-        if battleState == "active" and (tick() - lastBattleTick) > 8 then
+        if battleState == "active" and (tick() - lastBattleTick) > 15 then
             battleState = "idle"
             stateVal.Text = "Idle"
             stateVal.TextColor3 = C.TextDim
@@ -4988,20 +5026,27 @@ task.spawn(function()
     -- Extract onStepTaken from WalkEvents.beginLoop upvalues (matching original approach)
     local stepFunction = nil
     
-    -- Strategy 1: Use debug.getinfo to find by name
+    -- Strategy 1: Use getupvalues + getinfo to find by name
     pcall(function()
         if gameAPI.WalkEvents and gameAPI.WalkEvents.beginLoop then
             local getInfo = debug.getinfo or (getgenv and getgenv().getinfo)
-            if getupvalues then
-                local upvals = getupvalues(gameAPI.WalkEvents.beginLoop)
-                if type(upvals) == "table" then
-                    for _, v in pairs(upvals) do
-                        if type(v) == "function" and getInfo then
-                            local ok, info = pcall(getInfo, v)
-                            if ok and info and info.name == "onStepTaken" then
-                                stepFunction = v
-                                break
-                            end
+            local ups = safeGetUpvalues(gameAPI.WalkEvents.beginLoop)
+            if type(ups) == "table" then
+                for _, v in pairs(ups) do
+                    if type(v) == "function" and getInfo then
+                        local ok, info = pcall(getInfo, v)
+                        if ok and info and info.name == "onStepTaken" then
+                            stepFunction = v
+                            break
+                        end
+                    end
+                end
+                -- Fallback: if getinfo didn't match, take the first function upvalue
+                if not stepFunction then
+                    for _, v in pairs(ups) do
+                        if type(v) == "function" then
+                            stepFunction = v
+                            break
                         end
                     end
                 end
@@ -5009,18 +5054,42 @@ task.spawn(function()
         end
     end)
     
-    -- Strategy 2: If debug.getinfo didn't work, try to find by argument count
+    -- Strategy 2: getfenv on beginLoop to find onStepTaken in its environment
     if not stepFunction then
         pcall(function()
-            if gameAPI.WalkEvents and gameAPI.WalkEvents.beginLoop and getupvalues then
-                local upvals = getupvalues(gameAPI.WalkEvents.beginLoop)
-                if type(upvals) == "table" then
-                    for _, v in pairs(upvals) do
-                        if type(v) == "function" then
-                            -- onStepTaken takes a single boolean arg; try calling with true
-                            -- We can't test it, but if there's only one function upvalue, use it
-                            if not stepFunction then
-                                stepFunction = v
+            if gameAPI.WalkEvents and gameAPI.WalkEvents.beginLoop then
+                local env = getfenv(gameAPI.WalkEvents.beginLoop)
+                if type(env) == "table" then
+                    if type(env.onStepTaken) == "function" then
+                        stepFunction = env.onStepTaken
+                    end
+                    -- Also check sub-tables
+                    if not stepFunction then
+                        for k, v in pairs(env) do
+                            if type(v) == "table" and type(rawget(v, "onStepTaken")) == "function" then
+                                stepFunction = v.onStepTaken
+                                break
+                            end
+                        end
+                    end
+                end
+            end
+        end)
+    end
+    
+    -- Strategy 3: Scan getgc for a function named onStepTaken
+    if not stepFunction then
+        pcall(function()
+            if HAS.getgc then
+                local gc = HAS.getgc(true)
+                local getInfo = debug.getinfo or (getgenv and getgenv().getinfo)
+                if type(gc) == "table" and getInfo then
+                    for _, obj in ipairs(gc) do
+                        if type(obj) == "function" then
+                            local ok, info = pcall(getInfo, obj)
+                            if ok and info and info.name == "onStepTaken" then
+                                stepFunction = obj
+                                break
                             end
                         end
                     end
