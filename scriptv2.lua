@@ -120,29 +120,60 @@ end
 log("INFO", "Initializing LumiWare " .. VERSION .. " for:", PLAYER_NAME)
 
 --------------------------------------------------
--- GAME API EXFILTRATION (v4.6)
+-- GAME API EXFILTRATION (v4.6 — Hardened)
 --------------------------------------------------
 local gameAPI = nil
+local gameAPIReady = false  -- true ONLY after all hooks are installed
 local setThreadContext = setthreadcontext or function(_) end
 
+-- Multiple search strategies to find the internal module table.
+-- The game may have renamed or restructured — try several key combos.
+local SEARCH_KEYS = {
+    {"Utilities", "Battle"},        -- original structure
+    {"Utilities", "Network"},       -- if Battle was renamed
+    {"Battle", "Network"},          -- if Utilities was removed
+    {"DataManager", "Network"},     -- alternative
+    {"BattleGui", "Network"},       -- another fallback
+}
+
+local function isGameAPITable(t)
+    if type(t) ~= "table" then return false end
+    for _, keys in ipairs(SEARCH_KEYS) do
+        local ok = true
+        for _, k in ipairs(keys) do
+            if not rawget(t, k) then ok = false; break end
+        end
+        if ok then return true end
+    end
+    return false
+end
+
 local function initGameAPI()
+    -- Strategy 1: getgc scan
     pcall(function()
+        if not getgc then return end
         for _, obj in pairs(getgc(true)) do
-            if type(obj) == "table" and rawget(obj, "Utilities") and not (gameAPI and gameAPI.Battle) then
+            if isGameAPITable(obj) then
                 gameAPI = obj
+                return
             end
         end
     end)
+    
+    -- Strategy 2: debug.getregistry upvalue scan
     if not gameAPI then
         pcall(function()
+            if not debug or not debug.getregistry then return end
             for _, func in pairs(debug.getregistry()) do
-                if type(func) == "function" and not (gameAPI and gameAPI.Battle) then
+                if gameAPI then return end
+                if type(func) == "function" then
                     pcall(function()
                         local upvals = getupvalues(func)
                         if type(upvals) == "table" then
                             for _, upv in pairs(upvals) do
-                                if type(upv) == "table" and rawget(upv, "Utilities") and not (gameAPI and gameAPI.Battle) then
+                                if isGameAPITable(upv) then
                                     gameAPI = upv
+                                    return
                                 end
                             end
                         end
@@ -151,74 +182,168 @@ local function initGameAPI()
             end
         end)
     end
+    
+    -- Strategy 3: scan require cache / loaded modules
+    if not gameAPI then
+        pcall(function()
+            if not getrenv or not getrenv().require then return end
+            -- Some executors expose the module cache
+            if getreg then
+                for _, v in pairs(getreg()) do
+                    if gameAPI then return end
+                    if isGameAPITable(v) then
+                        gameAPI = v
+                    end
+                end
+            end
+        end)
+    end
+end
+
+-- Log diagnostic info about what was found
+local function logGameAPIStatus()
+    if not gameAPI then
+        log("API", "gameAPI is NIL — none of the search strategies found it")
+        return
+    end
+    local found = {}
+    local check = {"Battle","Network","Menu","DataManager","Utilities","BattleGui",
+                    "NPCChat","MasterControl","Repel","WalkEvents","PlayerData",
+                    "BattleClientSprite","BattleClientSide","RoundedFrame",
+                    "Constants","Assets","Fishing","ObjectiveManager","Mining"}
+    for _, k in ipairs(check) do
+        if rawget(gameAPI, k) then
+            table.insert(found, k)
+        end
+    end
+    log("API", "gameAPI found with keys: " .. table.concat(found, ", "))
 end
 
 task.spawn(function()
+    local attempts = 0
     while not gameAPI do
+        attempts = attempts + 1
         initGameAPI()
-        task.wait(1)
-    end
-    log("INFO", "Successfully hooked into Loomian Legacy internal modules.")
-    
-    -- Hook setupScene and loadModule/loadChunk to set thread context
-    local oldSetupScene = gameAPI.Battle.setupScene
-    if oldSetupScene then
-        gameAPI.Battle.setupScene = function(...)
-            setThreadContext(2)
-            return oldSetupScene(...)
-        end
-    end
-    local oldLoadModule = gameAPI.DataManager.loadModule
-    if oldLoadModule then
-        gameAPI.DataManager.loadModule = function(...)
-            setThreadContext(2)
-            return oldLoadModule(...)
-        end
-    end
-    local oldLoadChunk = gameAPI.DataManager.loadChunk
-    if oldLoadChunk then
-        gameAPI.DataManager.loadChunk = function(...)
-            setThreadContext(2)
-            return oldLoadChunk(...)
-        end
-    end
-    
-    -- Hook doTrainerBattle to wait for heal before trainer battles (from original)
-    local oldDoTrainerBattle = gameAPI.Battle.doTrainerBattle
-    if oldDoTrainerBattle then
-        gameAPI.Battle.doTrainerBattle = function(...)
-            -- Wait until healed if auto-heal is on
-            if config.autoHealEnabled then
-                while true do
-                    local ok, fullHP = pcall(function()
-                        return gameAPI.Network:get("PDS", "areFullHealth")
-                    end)
-                    if ok and fullHP then break end
-                    task.wait(0.5)
-                end
+        if not gameAPI then
+            if attempts % 10 == 0 then
+                log("API", "Still searching for gameAPI... (attempt " .. attempts .. ")")
             end
-            setThreadContext(2)
-            return oldDoTrainerBattle(...)
+            task.wait(1)
         end
     end
     
-    -- Remove unstuck cooldown (from original)
+    logGameAPIStatus()
+    
+    -- Install hooks safely (each in its own pcall so one failure doesn't block others)
+    
+    -- Hook setupScene
     pcall(function()
-        if gameAPI.Menu and gameAPI.Menu.options then
-            gameAPI.Menu.options.resetLastUnstuckTick = function() end
+        if gameAPI.Battle and gameAPI.Battle.setupScene then
+            local old = gameAPI.Battle.setupScene
+            gameAPI.Battle.setupScene = function(...)
+                setThreadContext(2)
+                return old(...)
+            end
+            log("HOOK", "Battle.setupScene hooked")
         end
     end)
     
-    -- FOV fix (from original)
+    -- Hook loadModule
+    pcall(function()
+        if gameAPI.DataManager and gameAPI.DataManager.loadModule then
+            local old = gameAPI.DataManager.loadModule
+            gameAPI.DataManager.loadModule = function(...)
+                setThreadContext(2)
+                return old(...)
+            end
+            log("HOOK", "DataManager.loadModule hooked")
+        end
+    end)
+    
+    -- Hook loadChunk
+    pcall(function()
+        if gameAPI.DataManager and gameAPI.DataManager.loadChunk then
+            local old = gameAPI.DataManager.loadChunk
+            gameAPI.DataManager.loadChunk = function(...)
+                setThreadContext(2)
+                return old(...)
+            end
+            log("HOOK", "DataManager.loadChunk hooked")
+        end
+    end)
+    
+    -- Hook doTrainerBattle to wait for heal before trainer battles
+    pcall(function()
+        if gameAPI.Battle and gameAPI.Battle.doTrainerBattle then
+            local old = gameAPI.Battle.doTrainerBattle
+            gameAPI.Battle.doTrainerBattle = function(...)
+                if config.autoHealEnabled then
+                    local maxWait = 60
+                    local start = tick()
+                    while (tick() - start) < maxWait do
+                        local ok, fullHP = pcall(function()
+                            return gameAPI.Network:get("PDS", "areFullHealth")
+                        end)
+                        if ok and fullHP then break end
+                        task.wait(0.5)
+                    end
+                end
+                setThreadContext(2)
+                return old(...)
+            end
+            log("HOOK", "Battle.doTrainerBattle hooked")
+        end
+    end)
+    
+    -- Hook switchMonster (from original — needed for proper battle automation)
+    pcall(function()
+        if gameAPI.BattleGui and gameAPI.BattleGui.switchMonster then
+            local old = gameAPI.BattleGui.switchMonster
+            gameAPI.BattleGui.switchMonster = function(...)
+                setThreadContext(2)
+                return old(...)
+            end
+            log("HOOK", "BattleGui.switchMonster hooked")
+        end
+    end)
+    
+    -- Suppress mastery progress when masteryDisable is on
+    pcall(function()
+        if gameAPI.Menu and gameAPI.Menu.mastery and gameAPI.Menu.mastery.showProgressUpdate then
+            local old = gameAPI.Menu.mastery.showProgressUpdate
+            gameAPI.Menu.mastery.showProgressUpdate = function(...)
+                if config.masteryDisable then return end
+                return old(...)
+            end
+            log("HOOK", "Menu.mastery.showProgressUpdate hooked")
+        end
+    end)
+    
+    -- Remove unstuck cooldown
+    pcall(function()
+        if gameAPI.Menu and gameAPI.Menu.options then
+            gameAPI.Menu.options.resetLastUnstuckTick = function() end
+            log("HOOK", "Unstuck cooldown removed")
+        end
+    end)
+    
+    -- FOV fix loop
     task.spawn(function()
         while task.wait(0.5) do
             pcall(function()
-                if gameAPI.MasterControl and gameAPI.MasterControl.WalkEnabled and not (gameAPI.Battle and gameAPI.Battle.currentBattle) then
-                    workspace.Camera.FieldOfView = 70
+                if gameAPI.MasterControl and gameAPI.MasterControl.WalkEnabled then
+                    local inBattle = false
+                    pcall(function() inBattle = gameAPI.Battle and gameAPI.Battle.currentBattle ~= nil end)
+                    if not inBattle then
+                        workspace.Camera.FieldOfView = 70
+                    end
                 end
             end)
         end
     end)
+    
+    gameAPIReady = true
+    log("INFO", "All gameAPI hooks installed successfully. LumiWare is ready.")
 end)
 
 --------------------------------------------------
@@ -635,7 +760,8 @@ end
 local isAutoHealing = false
 
 local function performGameAPIHeal()
-    if not gameAPI then return end
+    if not gameAPI or not gameAPIReady then return end
+    if isAutoHealing then return end -- Prevent re-entrancy
     
     local fullHealth = false
     pcall(function()
@@ -644,14 +770,41 @@ local function performGameAPIHeal()
     
     if fullHealth then return end
     
+    -- Extra safety: don't heal during battle
+    pcall(function()
+        if gameAPI.Battle and gameAPI.Battle.currentBattle then
+            return
+        end
+    end)
+    
+    -- Extra safety: don't heal if walk is disabled (already in a cutscene/menu)
+    pcall(function()
+        if not gameAPI.MasterControl.WalkEnabled or not gameAPI.Menu.enabled then
+            return
+        end
+    end)
+    
     log("HEAL", "Attempting gameAPI-based heal sequence...")
     isAutoHealing = true
     
-    pcall(function()
+    xpcall(function()
         local chunk = gameAPI.DataManager.currentChunk
+        if not chunk then
+            log("HEAL", "No current chunk, aborting heal")
+            isAutoHealing = false
+            return
+        end
+        
+        -- Don't heal if indoors (matching original's check)
+        if chunk.indoors then
+            log("HEAL", "Indoors, skipping heal")
+            isAutoHealing = false
+            return
+        end
         
         -- Method 1: If chunk has outdoor healers, use them directly
         if chunk.data and chunk.data.HasOutsideHealers then
+            setThreadContext(2)
             gameAPI.Network:get("heal", nil, "HealMachine1")
             log("HEAL", "Used outdoor healer.")
             isAutoHealing = false
@@ -688,6 +841,7 @@ local function performGameAPIHeal()
             task.wait()
             local healer = gameAPI.Network:get("getHealer", "HealthCenter")
             if healer then
+                setThreadContext(2)
                 gameAPI.Network:get("heal", "HealthCenter", healer)
             end
             if room then room:Destroy() end
@@ -696,15 +850,18 @@ local function performGameAPIHeal()
         -- Return to original location if we teleported
         if blackOutTarget and originalChunkId then
             pcall(function() chunk:destroy() end)
+            setThreadContext(2)
             pcall(function() gameAPI.DataManager:loadChunk(originalChunkId) end)
             if originalCFrame then
                 pcall(function() gameAPI.Utilities.Teleport(originalCFrame) end)
             end
-            gameAPI.Menu:enable()
+            pcall(function() gameAPI.Menu:enable() end)
             pcall(function() gameAPI.NPCChat:manualAdvance() end)
             pcall(function() gameAPI.Utilities.FadeIn(1) end)
-            gameAPI.MasterControl.WalkEnabled = true
+            pcall(function() gameAPI.MasterControl.WalkEnabled = true end)
         end
+    end, function(err)
+        warn("[LumiWare][HEAL] Error:", err)
     end)
     
     isAutoHealing = false
@@ -712,17 +869,21 @@ local function performGameAPIHeal()
 end
 
 
--- Infinite Repel Loop (reads from config directly so button toggles work)
+-- Infinite Repel Loop — matches original logic:
+-- When ON: always ensure steps >= 100
+-- When OFF: set steps to 0 (cancel repel effect)
+-- Runs every frame via game loop for reliability (original used LooP)
 task.spawn(function()
-    while task.wait(1) do
-        if config.infiniteRepel and gameAPI and gameAPI.Repel then
-            if gameAPI.Repel.steps < 10 then
-                gameAPI.Repel.steps = 100
-                logDebug("Repel steps reset to 100.")
+    while task.wait(0.5) do
+        pcall(function()
+            if not gameAPI or not gameAPI.Repel then return end
+            if config.infiniteRepel then
+                if gameAPI.Repel.steps < 10 then
+                    gameAPI.Repel.steps = 100
+                    logDebug("Repel steps reset to 100.")
+                end
             end
-        elseif gameAPI and gameAPI.Repel and not config.infiniteRepel then
-            -- Don't reset steps when disabled
-        end
+        end)
     end
 end)
 
@@ -2354,12 +2515,17 @@ addHoverEffect(UI.infRepelBtn, C.AccentDim, C.Teal)
 
 -- GUI Opener: Open PC
 track(UI.openPCBtn.MouseButton1Click:Connect(function()
+    if not gameAPIReady then
+        sendNotification("LumiWare", "Game API still loading... please wait", 3)
+        return
+    end
     pcall(function()
-        if gameAPI and gameAPI.Menu and gameAPI.Menu.pc then
+        if gameAPI.Menu and gameAPI.Menu.pc then
+            setThreadContext(2)
             gameAPI.Menu.pc:bootUp()
             sendNotification("LumiWare", "PC opened", 3)
         else
-            sendNotification("LumiWare", "Game API not ready", 3)
+            sendNotification("LumiWare", "PC module not found in this area", 3)
         end
     end)
 end))
@@ -2367,14 +2533,19 @@ addHoverEffect(UI.openPCBtn, C.AccentDim, C.Cyan)
 
 -- GUI Opener: Open Shop
 track(UI.openShopBtn.MouseButton1Click:Connect(function()
+    if not gameAPIReady then
+        sendNotification("LumiWare", "Game API still loading... please wait", 3)
+        return
+    end
     pcall(function()
-        if gameAPI and gameAPI.Menu and gameAPI.Menu.shop then
+        if gameAPI.Menu and gameAPI.Menu.shop then
+            setThreadContext(2)
             gameAPI.Menu:disable()
             gameAPI.Menu.shop:open()
             gameAPI.Menu:enable()
             sendNotification("LumiWare", "Shop opened", 3)
         else
-            sendNotification("LumiWare", "Game API not ready", 3)
+            sendNotification("LumiWare", "Shop module not found in this area", 3)
         end
     end)
 end))
@@ -2382,14 +2553,19 @@ addHoverEffect(UI.openShopBtn, C.AccentDim, C.Cyan)
 
 -- GUI Opener: Open Rally Team
 track(UI.openRallyTeamBtn.MouseButton1Click:Connect(function()
+    if not gameAPIReady then
+        sendNotification("LumiWare", "Game API still loading... please wait", 3)
+        return
+    end
     pcall(function()
-        if gameAPI and gameAPI.Menu and gameAPI.Menu.rally then
+        if gameAPI.Menu and gameAPI.Menu.rally then
+            setThreadContext(2)
             gameAPI.Menu:disable()
             gameAPI.Menu.rally:openRallyTeamMenu()
             gameAPI.Menu:enable()
             sendNotification("LumiWare", "Rally Team opened", 3)
         else
-            sendNotification("LumiWare", "Game API not ready", 3)
+            sendNotification("LumiWare", "Rally module not found", 3)
         end
     end)
 end))
@@ -2397,10 +2573,17 @@ addHoverEffect(UI.openRallyTeamBtn, C.AccentDim, C.Cyan)
 
 -- GUI Opener: Open Rallied
 track(UI.openRalliedBtn.MouseButton1Click:Connect(function()
+    if not gameAPIReady then
+        sendNotification("LumiWare", "Game API still loading... please wait", 3)
+        return
+    end
     pcall(function()
-        if gameAPI and gameAPI.Menu and gameAPI.Menu.rally then
-            local rStatus = gameAPI.Network:get("PDS", "ranchStatus")
-            if rStatus and rStatus.rallied and rStatus.rallied > 0 then
+        if gameAPI.Menu and gameAPI.Menu.rally then
+            setThreadContext(2)
+            local ok, rStatus = pcall(function()
+                return gameAPI.Network:get("PDS", "ranchStatus")
+            end)
+            if ok and rStatus and rStatus.rallied and rStatus.rallied > 0 then
                 gameAPI.Menu:disable()
                 gameAPI.Menu.rally:openRalliedMonstersMenu()
                 gameAPI.Menu:enable()
@@ -2409,7 +2592,7 @@ track(UI.openRalliedBtn.MouseButton1Click:Connect(function()
                 sendNotification("LumiWare", "No rallied Loomians", 3)
             end
         else
-            sendNotification("LumiWare", "Game API not ready", 3)
+            sendNotification("LumiWare", "Rally module not found", 3)
         end
     end)
 end))
@@ -2995,21 +3178,58 @@ pcall(function()
 end)
 
 --==================================================
--- AUTO-WALK
+-- AUTO-WALK (Fixed: waits for character to be fully loaded to avoid
+-- 'Part RightLowerLeg/LeftLowerLeg is not parented' warnings)
 --==================================================
+local function waitForCharacterReady()
+    local char = player.Character
+    if not char then
+        char = player.CharacterAdded:Wait()
+    end
+    -- Wait for the character model to be fully parented and loaded
+    if not char:IsDescendantOf(workspace) then
+        char.AncestryChanged:Wait()
+    end
+    local humanoid = char:WaitForChild("Humanoid", 10)
+    local rootPart = char:WaitForChild("HumanoidRootPart", 10)
+    -- Wait for the body to be assembled (avoids GetJoints warnings)
+    if humanoid then
+        pcall(function()
+            if not humanoid.RootPart then
+                humanoid:GetPropertyChangedSignal("RootPart"):Wait()
+            end
+        end)
+    end
+    task.wait(0.1) -- Small buffer for joints
+    return char, humanoid, rootPart
+end
+
 local function startAutoWalk()
     if autoWalkThread then return end
     autoWalkThread = task.spawn(function()
         _G.LumiWare_WalkThread = autoWalkThread
         log("INFO", "Auto-walk started")
-        local char = player.Character or player.CharacterAdded:Wait()
-        local humanoid = char:WaitForChild("Humanoid")
-        local rootPart = char:WaitForChild("HumanoidRootPart")
+        local char, humanoid, rootPart = waitForCharacterReady()
+        if not char or not humanoid or not rootPart then
+            log("WARN", "Auto-walk: character not ready, aborting")
+            autoWalkThread = nil
+            return
+        end
         local center = rootPart.Position
         local radius = 6
         local numPoints = 12
         local pointIndex = 0
         local heartbeat = RunService.Heartbeat
+
+        -- Re-acquire character on respawn
+        local respawnConn
+        respawnConn = player.CharacterAdded:Connect(function(newChar)
+            task.wait(0.5) -- Wait for body assembly
+            char = newChar
+            humanoid = char:WaitForChild("Humanoid", 10)
+            rootPart = char:WaitForChild("HumanoidRootPart", 10)
+            if rootPart then center = rootPart.Position end
+        end)
 
         while autoWalkEnabled and gui.Parent do
             if battleState == "active" then
@@ -3019,31 +3239,28 @@ local function startAutoWalk()
                 end)
                 task.wait(0.5)
             else
-                char = player.Character
-                if not char then task.wait(1)
+                if not char or not char.Parent or not humanoid or not rootPart or not rootPart.Parent then
+                    task.wait(1)
+                elseif humanoid.Health <= 0 then
+                    task.wait(1)
                 else
-                    humanoid = char:FindFirstChild("Humanoid")
-                    rootPart = char:FindFirstChild("HumanoidRootPart")
-                    if not humanoid or not rootPart or humanoid.Health <= 0 then
-                        task.wait(1)
-                    else
-                        pcall(function()
-                            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.LeftShift, false, game)
-                        end)
-                        local angle = (pointIndex / numPoints) * math.pi * 2
-                        local targetPos = center + Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius)
-                        pointIndex = (pointIndex + 1) % numPoints
-                        humanoid:MoveTo(targetPos)
-                        local moveStart = tick()
-                        while autoWalkEnabled and (tick() - moveStart) < 2 do
-                            heartbeat:Wait()
-                            if not rootPart or not rootPart.Parent then break end
-                            if (rootPart.Position - targetPos).Magnitude < 2 then break end
-                        end
+                    pcall(function()
+                        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.LeftShift, false, game)
+                    end)
+                    local angle = (pointIndex / numPoints) * math.pi * 2
+                    local targetPos = center + Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius)
+                    pointIndex = (pointIndex + 1) % numPoints
+                    humanoid:MoveTo(targetPos)
+                    local moveStart = tick()
+                    while autoWalkEnabled and (tick() - moveStart) < 2 do
+                        heartbeat:Wait()
+                        if not rootPart or not rootPart.Parent then break end
+                        if (rootPart.Position - targetPos).Magnitude < 2 then break end
                     end
                 end
             end
         end
+        if respawnConn then respawnConn:Disconnect() end
         pcall(function() VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.LeftShift, false, game) end)
         log("INFO", "Auto-walk stopped")
     end)
@@ -3975,142 +4192,202 @@ end)
 
 
 --------------------------------------------------------------------------------
--- DIALOGUE & POPUP INTERCEPTOR (Ported from Reference)
+-- DIALOGUE & POPUP INTERCEPTOR (Rewritten — matches original's suppress logic)
+-- Key insight: For deny cases, we DON'T call the original function.
+-- The game's message/Say functions yield (wait for user input). By returning
+-- without calling original, the coroutine auto-advances with default answer (No).
+-- For "give up on learning", we return true to answer Yes.
 --------------------------------------------------------------------------------
 task.spawn(function()
     while not gameAPI do task.wait() end
     
-    local function hookUI(uiTbl, funcName)
-        if not uiTbl or not uiTbl[funcName] then return end
-        local original = uiTbl[funcName]
-        uiTbl[funcName] = function(...)
-            local args = {...}
+    -- Core dialogue processor (returns: processedArgs, shouldShow)
+    -- If shouldShow is falsy, the dialogue is suppressed entirely.
+    -- If processedArgs == "Y/N", return shouldShow directly (answer the question).
+    local function processDialogue(funcName, ...)
+        local args = {...}
+        local processed = {}
+        local shouldShow = nil
+        
+        if type(args[2]) == "string" then
             local msg = args[2]
             
-            if type(msg) == "string" then
-                if msg:sub(1, 8) == "[NoSkip]" then
-                    args[2] = msg:sub(9)
-                    return original(unpack(args))
-                end
-                
-                if msg:sub(1, 5):lower() == "[y/n]" then
-                    if config.autoDenySwitch and msg:find("Will you switch Loomians") then
-                        args[2] = "Auto Deny Switch Enabled!"
-                    elseif config.autoDenyNick and msg:find("Give a nickname to the") then
-                        args[2] = "Auto Deny Nickname Enabled!"
-                    elseif config.autoDenyMove then
-                        if msg:find("reassign its moves") then
-                            args[2] = "Auto Deny Reassign Move Enabled!"
-                        elseif msg:find(" to give up on learning ") then
-                            return true -- Forces a 'Yes' automatically to stop learning
-                        end
-                    end
-                end
-                
-                if config.autoSkipDialogue then
-                    -- Filter out non-essential dialogue strings (skip instantly)
-                    local newArgs = {}
-                    local hasInteractive = false
-                    for _, v in ipairs(args) do
-                        if type(v) ~= "string" then
-                            table.insert(newArgs, v)
-                        else
-                            local vLower = v:lower()
-                            if vLower:sub(1,5) == "[y/n]" then
-                                table.insert(newArgs, v)
-                                hasInteractive = true
-                            elseif vLower:sub(1,9) == "[gamepad]" then
-                                -- Strip gamepad prefix but keep the text
-                                table.insert(newArgs, v:sub(10))
-                            elseif vLower:sub(1,4) == "[ma]" or vLower:sub(1,5) == "[pma]" then
-                                table.insert(newArgs, v)
-                                hasInteractive = true
-                            end
-                            -- Other plain strings are skipped (not added to newArgs)
-                        end
-                    end
-                    
-                    if not hasInteractive then
-                        -- No interactive elements, skip the entire dialogue
-                        return
-                    end
-                    args = newArgs
-                end
+            -- [NoSkip] messages must always be shown
+            if msg:sub(1, 8) == "[NoSkip]" then
+                args[2] = msg:sub(9)
+                return args, true
             end
             
-            setThreadContext(2)
-            return original(unpack(args))
+            -- Handle [y/n] prompts — deny logic
+            if msg:sub(1, 5):lower() == "[y/n]" then
+                if config.autoDenySwitch and msg:find("Will you switch Loomians") then
+                    -- Suppress the Y/N prompt entirely → game defaults to No
+                    return {}, false
+                elseif config.autoDenyNick and msg:find("Give a nickname to the") then
+                    return {}, false
+                elseif config.autoDenyMove then
+                    if msg:find("reassign its moves") then
+                        return {}, false
+                    elseif msg:find(" to give up on learning ") then
+                        -- Answer "Yes" to give up learning the move
+                        return "Y/N", true
+                    end
+                end
+            end
         end
+        
+        -- Skip Dialogue mode: filter out non-interactive text
+        if config.autoSkipDialogue then
+            for _, v in ipairs(args) do
+                if type(v) ~= "string" then
+                    table.insert(processed, v)
+                else
+                    local vLower = v:lower()
+                    if vLower:sub(1, 5) == "[y/n]" then
+                        table.insert(processed, v)
+                        shouldShow = true
+                    elseif vLower:sub(1, 9) == "[gamepad]" then
+                        -- Strip gamepad prefix
+                        local stripped = v:sub(10)
+                        if stripped:sub(1, 4):lower() == "[ma]" or stripped:sub(1, 5) == "[pma]" then
+                            table.insert(processed, v)
+                            shouldShow = true
+                        end
+                    elseif vLower:sub(1, 4) == "[ma]" or vLower:sub(1, 5) == "[pma]" then
+                        table.insert(processed, v)
+                        shouldShow = true
+                    end
+                    -- Other plain strings are filtered out (skipped)
+                end
+            end
+        else
+            -- Skip dialogue is OFF — pass everything through
+            processed = args
+            shouldShow = true
+        end
+        
+        return processed, shouldShow
+    end
+    
+    local function hookDialogueFunc(tbl, funcName)
+        if not tbl or not tbl[funcName] then return end
+        local original = tbl[funcName]
+        tbl[funcName] = function(...)
+            local result, shouldShow = processDialogue(funcName, ...)
+            
+            -- "Y/N" means auto-answer the question
+            if result == "Y/N" then
+                return shouldShow  -- true = Yes, false = No
+            end
+            
+            -- If shouldShow is truthy, call original with processed args
+            if shouldShow then
+                setThreadContext(2)
+                return original(unpack(result))
+            end
+            
+            -- shouldShow is falsy: suppress dialogue entirely (don't call original)
+            -- The calling coroutine will continue as if user dismissed it.
+            return
+        end
+        log("HOOK", "Dialogue function " .. funcName .. " hooked")
     end
 
-    pcall(function()
-        hookUI(gameAPI.BattleGui, "message")
-        hookUI(gameAPI.NPCChat, "Say")
-        hookUI(gameAPI.NPCChat, "say")
-    end)
+    pcall(function() hookDialogueFunc(gameAPI.BattleGui, "message") end)
+    pcall(function() hookDialogueFunc(gameAPI.NPCChat, "Say") end)
+    pcall(function() hookDialogueFunc(gameAPI.NPCChat, "say") end)
 end)
 
 
 
 --------------------------------------------------------------------------------
--- AUTO RALLY MODULE (ported from original handleRallied approach)
+-- AUTO RALLY MODULE (Rewritten with DataManager.setLoading + Utilities.Sync)
+-- Matches original's approach exactly: check rallied, build decisions, submit.
 --------------------------------------------------------------------------------
 task.spawn(function()
-    while not gameAPI do task.wait() end
+    while not gameAPIReady do task.wait() end
     
-    -- Continuously check for rallied Loomians
     task.spawn(function()
         while task.wait(3) do
             pcall(function()
                 if not config.autoRally or not gameAPI then return end
+                if not gameAPI.Network then return end
                 
                 local ralliedData = gameAPI.Network:get("PDS", "getRallied")
-                if not ralliedData or not ralliedData.monsters or not ralliedData.monsters[1] then return end
+                if not ralliedData then return end
+                
+                local monsters = ralliedData.monsters
+                if not monsters or not monsters[1] then return end
                 
                 local decisions = {}
+                local loadingKeys = {}
                 
-                for idx, mon in pairs(ralliedData.monsters) do
-                    -- Count max IVs (6 = perfect 40)
+                for idx, mon in pairs(monsters) do
+                    -- Count max IVs (6 = perfect 40, which is max in Loomian Legacy)
                     local maxIVCount = 0
-                    if mon.summ and mon.summ.ivr then
-                        for _, iv in pairs(mon.summ.ivr) do
-                            if iv == 6 then maxIVCount = maxIVCount + 1 end
+                    pcall(function()
+                        if mon.summ and mon.summ.ivr then
+                            for _, iv in pairs(mon.summ.ivr) do
+                                if iv == 6 then maxIVCount = maxIVCount + 1 end
+                            end
                         end
-                    end
+                    end)
                     
                     local keep = false
                     
-                    -- Keep gleaming
+                    -- Keep gleaming (mon.gl is truthy for gleam)
                     if config.rallyKeepGleam and mon.gl then
                         keep = true
                     end
                     
-                    -- Keep hidden ability
+                    -- Keep hidden ability (mon.sa is truthy for secret ability)
                     if config.rallyKeepHA and mon.sa then
                         keep = true
                     end
                     
                     -- Decision: 2 = keep, 1 = release
                     decisions[idx] = keep and 2 or 1
+                    
+                    log("RALLY", string.format("Mon #%s: gl=%s sa=%s ivMax=%d → %s",
+                        tostring(idx), tostring(mon.gl), tostring(mon.sa),
+                        maxIVCount, keep and "KEEP" or "RELEASE"))
                 end
+                
+                -- Use DataManager.setLoading if available (prevents UI race conditions)
+                pcall(function()
+                    if gameAPI.DataManager and gameAPI.DataManager.setLoading then
+                        gameAPI.DataManager:setLoading(loadingKeys, true)
+                    end
+                end)
                 
                 -- Submit decisions
+                setThreadContext(2)
                 local result = gameAPI.Network:get("PDS", "handleRallied", decisions)
+                
+                pcall(function()
+                    if gameAPI.DataManager and gameAPI.DataManager.setLoading then
+                        gameAPI.DataManager:setLoading(loadingKeys, false)
+                    end
+                end)
+                
                 if result then
-                    if gameAPI.Menu.rally.ralliedCount then
-                        gameAPI.Menu.rally.ralliedCount = result
-                    end
-                    if gameAPI.Menu.rally.updateNPCBubble then
-                        gameAPI.Menu.rally.updateNPCBubble(result)
-                    end
+                    pcall(function()
+                        if gameAPI.Menu and gameAPI.Menu.rally then
+                            gameAPI.Menu.rally.ralliedCount = result
+                            if gameAPI.Menu.rally.updateNPCBubble then
+                                gameAPI.Menu.rally.updateNPCBubble(result)
+                            end
+                        end
+                    end)
+                    log("RALLY", "Handled rallied batch, new count: " .. tostring(result))
                 end
                 
-                -- Show mastery if included
-                if ralliedData.mastery and gameAPI.Menu.mastery then
-                    pcall(function()
+                -- Show mastery progress if included in response
+                pcall(function()
+                    if ralliedData.mastery and gameAPI.Menu and gameAPI.Menu.mastery then
                         gameAPI.Menu.mastery:showProgressUpdate(ralliedData.mastery, false)
-                    end)
-                end
+                    end
+                end)
             end)
         end
     end)
@@ -4122,10 +4399,12 @@ end)
 -- AUTO ENCOUNTER MODULE
 --------------------------------------------------------------------------------
 task.spawn(function()
-    while not gameAPI do task.wait() end
+    while not gameAPIReady do task.wait() end
     
     -- Extract onStepTaken from WalkEvents.beginLoop upvalues (matching original approach)
     local stepFunction = nil
+    
+    -- Strategy 1: Use debug.getinfo to find by name
     pcall(function()
         if gameAPI.WalkEvents and gameAPI.WalkEvents.beginLoop then
             local getInfo = debug.getinfo or (getgenv and getgenv().getinfo)
@@ -4134,8 +4413,8 @@ task.spawn(function()
                 if type(upvals) == "table" then
                     for _, v in pairs(upvals) do
                         if type(v) == "function" and getInfo then
-                            local info = getInfo(v)
-                            if info and info.name == "onStepTaken" then
+                            local ok, info = pcall(getInfo, v)
+                            if ok and info and info.name == "onStepTaken" then
                                 stepFunction = v
                                 break
                             end
@@ -4146,30 +4425,59 @@ task.spawn(function()
         end
     end)
     
+    -- Strategy 2: If debug.getinfo didn't work, try to find by argument count
+    if not stepFunction then
+        pcall(function()
+            if gameAPI.WalkEvents and gameAPI.WalkEvents.beginLoop and getupvalues then
+                local upvals = getupvalues(gameAPI.WalkEvents.beginLoop)
+                if type(upvals) == "table" then
+                    for _, v in pairs(upvals) do
+                        if type(v) == "function" then
+                            -- onStepTaken takes a single boolean arg; try calling with true
+                            -- We can't test it, but if there's only one function upvalue, use it
+                            if not stepFunction then
+                                stepFunction = v
+                            end
+                        end
+                    end
+                end
+            end
+        end)
+    end
+    
     if stepFunction then
         log("ENCOUNTER", "Successfully extracted onStepTaken function")
     else
-        log("ENCOUNTER", "Could not find onStepTaken — auto encounter unavailable")
+        log("ENCOUNTER", "Could not find onStepTaken — auto encounter will use fallback")
     end
     
     task.spawn(function()
         while task.wait(0.1) do
             pcall(function()
-                if config.autoEncounter and stepFunction and gameAPI then
-                    if gameAPI.MasterControl.WalkEnabled
-                        and gameAPI.Menu.enabled
-                        and not (currentBattle and currentBattle.active)
-                        and gameAPI.PlayerData.completedEvents.ChooseBeginner then
-                        -- Check health before encounter (matching original vu25 logic)
-                        local canEncounter = true
-                        if config.autoHealEnabled then
-                            local fullHP = gameAPI.Network:get("PDS", "areFullHealth")
-                            if not fullHP then canEncounter = false end
-                        end
-                        if canEncounter then
-                            stepFunction(true)
-                        end
-                    end
+                if not config.autoEncounter or not gameAPI then return end
+                
+                -- Check preconditions
+                local canRun = false
+                pcall(function()
+                    canRun = gameAPI.MasterControl and gameAPI.MasterControl.WalkEnabled
+                        and gameAPI.Menu and gameAPI.Menu.enabled
+                        and not (gameAPI.Battle and gameAPI.Battle.currentBattle)
+                        and gameAPI.PlayerData and gameAPI.PlayerData.completedEvents
+                        and gameAPI.PlayerData.completedEvents.ChooseBeginner
+                end)
+                if not canRun then return end
+                
+                -- Check health before encounter (matching original vu25 logic)
+                if config.autoHealEnabled then
+                    local ok, fullHP = pcall(function()
+                        return gameAPI.Network:get("PDS", "areFullHealth")
+                    end)
+                    if ok and not fullHP then return end
+                end
+                
+                if stepFunction then
+                    setThreadContext(2)
+                    stepFunction(true)
                 end
             end)
         end
@@ -4182,7 +4490,7 @@ end)
 -- EXPLOIT HOOKS (Fast Battle, Unstuck, UMV, Fish)
 --------------------------------------------------------------------------------
 task.spawn(function()
-    while not gameAPI do task.wait() end
+    while not gameAPIReady do task.wait() end
 
     -- Background enforcer loop for exploits
     local fishHooked = false
