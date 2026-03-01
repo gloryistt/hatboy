@@ -1,188 +1,172 @@
 --------------------------------------------------
 -- LUMIWARE V4.6 — Enhanced Update
--- + Trainer Battle Auto-Mode
--- + Config Save/Load/Reset Tab
--- + Auto-Heal Scanner & Auto-Heal
--- + Encounter Rate Graph
--- + Battle Type Filter for Automation
--- + Flee Fail Retry Improvements
+-- Fixed: Lua 200-local-register limit
+-- Trainer Auto | Config Tab | Auto-Heal | Filters
 --------------------------------------------------
-local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local TweenService = game:GetService("TweenService")
-local CoreGui = game:GetService("CoreGui")
-local StarterGui = game:GetService("StarterGui")
-local SoundService = game:GetService("SoundService")
-local UserInputService = game:GetService("UserInputService")
-local HttpService = game:GetService("HttpService")
-local RunService = game:GetService("RunService")
-
-local VERSION = "v4.6"
-
---------------------------------------------------
--- CONFIGURATION SYSTEM
---------------------------------------------------
-local configName = "LumiWare_v46_Config.json"
-local defaultConfig = {
-    webhookUrl = "",
-    useAutoPing = false,
-    pingIds = "",
-    autoMode = "off",
-    autoMoveSlot = 1,
-    autoWalk = false,
-    discoveryMode = false,
-    customRares = {},
-    -- NEW v4.6
-    trainerAutoMode = "off",     -- "off", "move", "run"
-    trainerAutoMoveSlot = 1,
-    autoHealEnabled = false,
-    autoHealThreshold = 30,      -- Heal when HP < X%
-    healRemoteName = "",         -- Scanned heal remote name
-    healRemotePath = "",         -- Full path
-    autoHealMethod = "remote",   -- "remote" or "button"
-    healButtonPath = "",
-    automateTrainer = true,
-    automateWild = true,
+local Svc = {
+    Players   = game:GetService("Players"),
+    RS        = game:GetService("ReplicatedStorage"),
+    Tween     = game:GetService("TweenService"),
+    CoreGui   = game:GetService("CoreGui"),
+    StarterGui= game:GetService("StarterGui"),
+    Sound     = game:GetService("SoundService"),
+    UIS       = game:GetService("UserInputService"),
+    Http      = game:GetService("HttpService"),
+    Run       = game:GetService("RunService"),
+    VIM       = game:GetService("VirtualInputManager"),
+    GUI       = game:GetService("GuiService"),
 }
 
-local config = defaultConfig
+local VERSION    = "v4.6"
+local player     = Svc.Players.LocalPlayer
+local PLAYER_NAME = player.Name
+
+--------------------------------------------------
+-- CONFIG
+--------------------------------------------------
+local CFG_FILE = "LumiWare_v46_Config.json"
+local DEFAULT_CFG = {
+    webhookUrl="", pingIds="",
+    autoMode="off", autoMoveSlot=1,
+    trainerAutoMode="off", trainerAutoMoveSlot=1,
+    autoWalk=false, discoveryMode=false, customRares={},
+    autoHealEnabled=false, autoHealThreshold=30,
+    healRemoteName="", healRemotePath="", autoHealMethod="remote",
+    automateTrainer=true, automateWild=true,
+}
+local cfg = {}
+for k,v in pairs(DEFAULT_CFG) do cfg[k]=v end
 if isfile and readfile and writefile then
     pcall(function()
-        if isfile(configName) then
-            local decoded = HttpService:JSONDecode(readfile(configName))
-            for k, v in pairs(decoded) do
-                config[k] = v
-            end
-        else
-            writefile(configName, HttpService:JSONEncode(defaultConfig))
-        end
+        if isfile(CFG_FILE) then
+            local ok, dec = pcall(function() return Svc.Http:JSONDecode(readfile(CFG_FILE)) end)
+            if ok and type(dec)=="table" then for k,v in pairs(dec) do cfg[k]=v end end
+        else writefile(CFG_FILE, Svc.Http:JSONEncode(DEFAULT_CFG)) end
     end)
 end
-
 local function saveConfig()
-    if writefile then
-        pcall(function()
-            writefile(configName, HttpService:JSONEncode(config))
-        end)
-    end
+    if writefile then pcall(function() writefile(CFG_FILE, Svc.Http:JSONEncode(cfg)) end) end
 end
-
-local function resetConfigToDefault()
-    config = {}
-    for k, v in pairs(defaultConfig) do
-        config[k] = v
-    end
+local function resetCfgDefault()
+    for k,v in pairs(DEFAULT_CFG) do cfg[k]=v end
     saveConfig()
 end
-
-local VirtualInputManager = game:GetService("VirtualInputManager")
-
-local player = Players.LocalPlayer
-local PLAYER_NAME = player.Name
 
 --------------------------------------------------
 -- LOGGING
 --------------------------------------------------
-local VERBOSE_MODE = false
+local VERBOSE = false
+local function log(cat,...) print("[LumiWare]["..cat.."]",...) end
+local function logD(...) if VERBOSE then log("DBG",...) end end
 
-local function log(category, ...)
-    print("[LumiWare][" .. category .. "]", ...)
-end
-
-local function logDebug(...)
-    if VERBOSE_MODE then log("DEBUG", ...) end
-end
-
-log("INFO", "Initializing LumiWare " .. VERSION .. " for:", PLAYER_NAME)
+log("INFO","LumiWare "..VERSION.." starting for: "..PLAYER_NAME)
 
 --------------------------------------------------
--- RARE LOOMIANS
+-- STATE (consolidated into tables)
+--------------------------------------------------
+local State = {
+    encounterCount=0, huntStart=tick(), currentEnemy=nil,
+    isMinimized=false, battleState="idle", lastBattleTick=0,
+    raresFound=0, encounterHistory={}, discoveryMode=false,
+    sessionKOs=0, sessionDamage=0,
+    pendingAutoAction=false, rareFoundPause=false,
+}
+local Auto = {
+    wildMode   = cfg.autoMode or "off",
+    wildSlot   = cfg.autoMoveSlot or 1,
+    trMode     = cfg.trainerAutoMode or "off",
+    trSlot     = cfg.trainerAutoMoveSlot or 1,
+    walkEnabled= false, walkThread=nil,
+    trainerOn  = (cfg.automateTrainer ~= false),
+    wildOn     = (cfg.automateWild ~= false),
+}
+local Heal = {
+    enabled    = cfg.autoHealEnabled or false,
+    threshold  = cfg.autoHealThreshold or 30,
+    remote     = nil,
+    remoteName = cfg.healRemoteName or "",
+    remotePath = cfg.healRemotePath or "",
+    method     = cfg.autoHealMethod or "remote",
+    lastTime   = 0, cooldown=10,
+    scanned    = {},
+}
+local Battle = {
+    active=false, enemy=nil, player=nil,
+    enemyStats=nil, playerStats=nil,
+    battleType="N/A", enemyProcessed=false, enemyRawEntry=nil,
+}
+local Webhook = { url = cfg.webhookUrl or "" }
+local customRares = cfg.customRares or {}
+
+local function resetBattle()
+    Battle={active=false,enemy=nil,player=nil,
+        enemyStats=nil,playerStats=nil,
+        battleType="N/A",enemyProcessed=false,enemyRawEntry=nil}
+end
+
+--------------------------------------------------
+-- RARE DATA
 --------------------------------------------------
 local RARE_LOOMIANS = {
-    "Duskit", "Ikazune", "Mutagon", "Metronette", "Wabalisc",
-    "Cephalops", "Elephage", "Gargolem", "Celesting", "Nyxre", "Pyramind",
-    "Terracolt", "Garbantis", "Avitross", "Snocub", "Eaglit", "Grimyuline",
-    "Vambat", "Weevolt", "Nevermare", "Ikazune", "Protogon", "Mimask", "Odoyaga", "Yari",
-    "Akhalos", "Odasho", "Cosmiore", "Dakuda", "Shawchi", "Arceros", "Galacadia"
+    "Duskit","Ikazune","Mutagon","Metronette","Wabalisc",
+    "Cephalops","Elephage","Gargolem","Celesting","Nyxre","Pyramind",
+    "Terracolt","Garbantis","Avitross","Snocub","Eaglit","Grimyuline",
+    "Vambat","Weevolt","Nevermare","Protogon","Mimask","Odoyaga","Yari",
+    "Akhalos","Odasho","Cosmiore","Dakuda","Shawchi","Arceros","Galacadia"
 }
-local customRares = config.customRares or {}
+local RARE_MOD = {"gleam","gleaming","gamma","corrupt","corrupted","alpha",
+    "iridescent","metallic","rainbow","sa ","pn ","hw ","ny ","secret","shiny","radiant"}
+local RARE_KW  = {"gleam","gamma","corrupt","alpha","iridescent","metallic",
+    "rainbow","shiny","radiant","secret"}
 
-local RARE_MODIFIERS = {
-    "gleam", "gleaming", "gamma", "corrupt", "corrupted",
-    "alpha", "iridescent", "metallic", "rainbow",
-    "sa ", "pn ", "hw ", "ny ",
-    "secret", "shiny", "radiant",
-}
-
-local function isRareModifier(name)
-    if type(name) ~= "string" then return false end
-    local l = string.lower(name)
-    for _, mod in ipairs(RARE_MODIFIERS) do
-        if string.find(l, mod) then return true end
-    end
+local function isRareMod(name)
+    if type(name)~="string" then return false end
+    local l=name:lower()
+    for _,m in ipairs(RARE_MOD) do if l:find(m) then return true end end
     return false
 end
 
-local RARE_KEYWORDS_DEEP = {
-    "gleam", "gamma", "corrupt", "alpha",
-    "iridescent", "metallic", "rainbow", "shiny", "radiant", "secret",
-}
-
-local function deepScanForRare(value, depth)
-    if depth > 5 then return false end
-    depth = depth or 0
-    if type(value) == "string" then
-        local l = string.lower(value)
-        for _, kw in ipairs(RARE_KEYWORDS_DEEP) do
-            if string.find(l, kw) then
-                log("RARE", "Deep scan HIT: keyword=" .. kw .. " in string=" .. string.sub(value, 1, 60))
-                return true
-            end
-        end
-    elseif type(value) == "table" then
-        for k, v in pairs(value) do
-            if type(k) == "string" then
-                local kl = string.lower(k)
-                if kl == "variant" or kl == "gleam" or kl == "gamma" or kl == "corrupt"
-                    or kl == "issecret" or kl == "isgleam" or kl == "isgamma" then
-                    if v == true or v == 1 or (type(v) == "string" and v ~= "" and v ~= "false" and v ~= "0") then
-                        log("RARE", "Deep scan HIT: key=" .. k .. " val=" .. tostring(v))
-                        return true
-                    end
+local function deepScanRare(val,depth)
+    if depth>5 then return false end
+    depth=depth or 0
+    if type(val)=="string" then
+        local l=val:lower()
+        for _,kw in ipairs(RARE_KW) do if l:find(kw) then return true end end
+    elseif type(val)=="table" then
+        for k,v in pairs(val) do
+            if type(k)=="string" then
+                local kl=k:lower()
+                if kl=="variant" or kl=="gleam" or kl=="gamma" or kl=="corrupt"
+                   or kl=="issecret" or kl=="isgleam" or kl=="isgamma" then
+                    if v==true or v==1 or (type(v)=="string" and v~="" and v~="false" and v~="0") then
+                        return true end
                 end
             end
-            if deepScanForRare(v, depth + 1) then return true end
+            if deepScanRare(v,depth+1) then return true end
         end
     end
     return false
 end
 
-local function scanEntryForRare(entry)
-    if type(entry) ~= "table" then return false end
-    for i = 1, #entry do
-        local v = entry[i]
-        if type(v) == "string" then
-            if isRareModifier(v) then return true end
-        elseif type(v) == "table" then
-            if deepScanForRare(v, 0) then return true end
-        end
+local function scanEntryRare(entry)
+    if type(entry)~="table" then return false end
+    for i=1,#entry do
+        local v=entry[i]
+        if type(v)=="string" and isRareMod(v) then return true end
+        if type(v)=="table"  and deepScanRare(v,0) then return true end
     end
     return false
 end
 
 local function isRareLoomian(name)
-    local l = string.lower(name)
-    for _, r in ipairs(RARE_LOOMIANS) do
-        if string.find(l, string.lower(r)) then return true end
-    end
-    for _, r in ipairs(customRares) do
-        if string.find(l, string.lower(r)) then return true end
-    end
+    local l=name:lower()
+    for _,r in ipairs(RARE_LOOMIANS) do if l:find(r:lower()) then return true end end
+    for _,r in ipairs(customRares)    do if l:find(r:lower()) then return true end end
     return false
 end
 
 --------------------------------------------------
--- MASTERY DATA (135 families)
+-- MASTERY DATA
 --------------------------------------------------
 local MASTERY_DATA = {
     {f="Embit/Rabburn/Searknight",t={{"D",0,200},{"E",30000,300},{"R",50,400},{"K",30,100}}},
@@ -323,2216 +307,1174 @@ local MASTERY_DATA = {
 }
 
 local TASK_NAMES = {
-    D="Discover all stages", E="Earn Experience", R="Rally", K="KO Loomians",
-    C="Capture", DD="Deal Damage", KSE="KO w/ Super Effective", DC="Deal Crits",
-    LU="Level Up", FB="Form Perfect Bond", BU="Burn Loomians", PA="Paralyze",
-    SL="Put to Sleep", PO="Poison Loomians", FR="Inflict Frostbite"
+    D="Discover all stages",E="Earn Experience",R="Rally",K="KO Loomians",
+    C="Capture",DD="Deal Damage",KSE="KO w/ Super Effective",DC="Deal Crits",
+    LU="Level Up",FB="Form Perfect Bond",BU="Burn Loomians",PA="Paralyze",
+    SL="Put to Sleep",PO="Poison Loomians",FR="Inflict Frostbite"
 }
 
 local function searchMastery(query)
-    if not query or query == "" then return {} end
-    local q = string.lower(query)
-    local results = {}
-    for _, entry in ipairs(MASTERY_DATA) do
-        if string.find(string.lower(entry.f), q) then
-            table.insert(results, entry)
-        end
-    end
-    return results
-end
-
-local sessionKOs = 0
-local sessionDamage = 0
-
-local function sendNotification(title, text, duration)
-    pcall(function()
-        StarterGui:SetCore("SendNotification", { Title = title, Text = text, Duration = duration or 5 })
-    end)
-end
-
-local function playRareSound()
-    pcall(function()
-        local s = Instance.new("Sound")
-        s.SoundId = "rbxassetid://6518811702"
-        s.Volume = 1
-        s.Parent = SoundService
-        s:Play()
-        task.delay(3, function() s:Destroy() end)
-    end)
-end
-
---------------------------------------------------
--- WEBHOOK
---------------------------------------------------
-local webhookUrl = config.webhookUrl or ""
-
-local function sendWebhook(embedData, contentText)
-    if webhookUrl == "" then return end
-    pcall(function()
-        local payloadObj = { username = "LumiWare", embeds = { embedData } }
-        if contentText then payloadObj.content = contentText end
-        local payload = HttpService:JSONEncode(payloadObj)
-        local httpFunc = (syn and syn.request) or (http and http.request) or request or http_request
-        if httpFunc then
-            httpFunc({ Url = webhookUrl, Method = "POST", Headers = { ["Content-Type"] = "application/json" }, Body = payload })
-        end
-    end)
-end
-
-local function getRarityTier(name)
-    local l = string.lower(name)
-    local superRares = {"duskit", "ikazune", "mutagon", "protogon", "metronette", "wabalisc", "cephalops", "elephage", "gargolem", "celesting", "nyxre", "odasho", "cosmiore", "armenti", "nevermare", "akhalos"}
-    for _, r in ipairs(superRares) do
-        if string.find(l, r) then return "SUPER RARE" end
-    end
-    if string.find(l, "gamma") then return "GAMMA RARE" end
-    if string.find(l, "gleam") then return "GLEAMING RARE" end
-    if string.find(l, "corrupt") then return "CORRUPT" end
-    if string.find(l, "sa ") or string.find(l, "secret") then return "SECRET ABILITY" end
-    return "RARE"
-end
-
-local function sendRareWebhook(name, level, gender, enc, huntTime)
-    local rarityTier = getRarityTier(name)
-    sendWebhook({
-        title = "⭐ " .. rarityTier .. " FOUND!", description = "**" .. name .. "** detected!",
-        color = 16766720,
-        fields = {
-            { name = "Rarity Tier", value = rarityTier, inline = true },
-            { name = "Loomian", value = name, inline = true },
-            { name = "Level", value = tostring(level or "?"), inline = true },
-            { name = "Gender", value = gender or "?", inline = true },
-            { name = "Encounters", value = tostring(enc), inline = true },
-            { name = "Hunt Time", value = huntTime or "?", inline = true },
-            { name = "Player", value = PLAYER_NAME, inline = true },
-        },
-        footer = { text = "LumiWare " .. VERSION .. " • " .. os.date("%X") },
-    }, "@everyone")
-end
-
-local function sendSessionWebhook(enc, huntTime, rares)
-    sendWebhook({
-        title = "📊 Session Summary", description = "LumiWare session update",
-        color = 7930367,
-        fields = {
-            { name = "Encounters", value = tostring(enc), inline = true },
-            { name = "Hunt Time", value = huntTime, inline = true },
-            { name = "Rares", value = tostring(rares), inline = true },
-            { name = "Player", value = PLAYER_NAME, inline = true },
-        },
-        footer = { text = "LumiWare " .. VERSION .. " • " .. os.date("%X") },
-    })
-end
-
---------------------------------------------------
--- STATE
---------------------------------------------------
-local encounterCount = 0
-local huntStartTime = tick()
-local currentEnemy = nil
-local isMinimized = false
-local battleState = "idle"
-local lastBattleTick = 0
-local raresFoundCount = 0
-local encounterHistory = {}
-local discoveryMode = false
-
--- Automation state
-local autoMode = config.autoMode or "off"
-local autoMoveSlot = config.autoMoveSlot or 1
-local autoWalkEnabled = false
-local autoWalkThread = nil
-local rareFoundPause = false
-local pendingAutoAction = false
-
--- NEW v4.6: Trainer automation
-local trainerAutoMode = config.trainerAutoMode or "off"
-local trainerAutoMoveSlot = config.trainerAutoMoveSlot or 1
-
--- NEW v4.6: Auto-heal
-local autoHealEnabled = config.autoHealEnabled or false
-local autoHealThreshold = config.autoHealThreshold or 30
-local healRemote = nil
-local healRemoteName = config.healRemoteName or ""
-local healRemotePath = config.healRemotePath or ""
-local scannedHealRemotes = {}  -- list of {name, path, remote}
-local autoHealMethod = config.autoHealMethod or "remote"
-local healButtonPath = config.healButtonPath or ""
-local lastHealTime = 0
-local healCooldown = 10  -- seconds between heals
-
--- Battle filter flags
-local automateTrainer = (config.automateTrainer ~= false)
-local automateWild = (config.automateWild ~= false)
-
-local currentBattle = {
-    active = false,
-    enemy = nil,
-    player = nil,
-    enemyStats = nil,
-    playerStats = nil,
-    battleType = "N/A",
-    enemyProcessed = false,
-}
-
-local function resetBattle()
-    currentBattle = {
-        active = false, enemy = nil, player = nil,
-        enemyStats = nil, playerStats = nil,
-        battleType = "N/A", enemyProcessed = false,
-    }
+    if not query or query=="" then return MASTERY_DATA end
+    local q=query:lower(); local out={}
+    for _,e in ipairs(MASTERY_DATA) do if e.f:lower():find(q) then out[#out+1]=e end end
+    return out
 end
 
 --------------------------------------------------
 -- HELPERS
 --------------------------------------------------
-local function extractLoomianName(str)
+local function notify(t,msg,dur)
+    pcall(function() Svc.StarterGui:SetCore("SendNotification",{Title=t,Text=msg,Duration=dur or 5}) end)
+end
+
+local function playRare()
+    pcall(function()
+        local s=Instance.new("Sound"); s.SoundId="rbxassetid://6518811702"
+        s.Volume=1; s.Parent=Svc.Sound; s:Play()
+        task.delay(3,function() s:Destroy() end)
+    end)
+end
+
+local function fmtTime(s)
+    local h=math.floor(s/3600); local m=math.floor((s%3600)/60); local sc=math.floor(s%60)
+    return h>0 and ("%dh %02dm %02ds"):format(h,m,sc) or ("%dm %02ds"):format(m,sc)
+end
+
+local function nameFormat(str)
     if not str then return "Unknown" end
-    local formatted = str:gsub("-", " ")
-    formatted = formatted:gsub("(%a)([%w_]*)", function(a, b) return string.upper(a) .. b end)
-    return formatted
+    return str:gsub("-"," "):gsub("(%a)([%w_]*)",function(a,b) return a:upper()..b end)
 end
 
-local function parseLoomianStats(infoStr)
-    if type(infoStr) ~= "string" then return nil end
-    local name, level, rest = infoStr:match("^(.+), L(%d+), (.+)$")
-    if not level then return nil end
-    local gender = rest and rest:match("^(%a)") or "?"
-    local hp, maxHP = rest and rest:match("(%d+)/(%d+)") or nil, nil
-    return { name = name, level = tonumber(level), gender = gender, hp = tonumber(hp), maxHP = tonumber(maxHP) }
+local function parseStats(info)
+    if type(info)~="string" then return nil end
+    local name,lv,rest=info:match("^(.+), L(%d+), (.+)$")
+    if not lv then return nil end
+    local g=rest:match("^(%a)") or "?"
+    local hp,mhp=rest:match("(%d+)/(%d+)")
+    return {name=name,level=tonumber(lv),gender=g,hp=tonumber(hp),maxHP=tonumber(mhp)}
 end
 
-local function formatTime(seconds)
-    local h = math.floor(seconds / 3600)
-    local m = math.floor((seconds % 3600) / 60)
-    local s = math.floor(seconds % 60)
-    if h > 0 then return string.format("%dh %02dm %02ds", h, m, s)
-    else return string.format("%dm %02ds", m, s) end
-end
-
-local function tablePreview(tbl, depth)
-    depth = depth or 0
-    if depth > 2 then return "{...}" end
-    local parts, count = {}, 0
-    for k, v in pairs(tbl) do
-        count = count + 1
-        if count > 6 then table.insert(parts, "...") break end
-        if type(v) == "table" then table.insert(parts, tostring(k) .. "=" .. tablePreview(v, depth + 1))
-        else table.insert(parts, tostring(k) .. "=" .. tostring(v)) end
+local function tblPreview(tbl,depth)
+    depth=depth or 0; if depth>2 then return "{...}" end
+    local parts,c={},0
+    for k,v in pairs(tbl) do
+        c=c+1; if c>6 then parts[#parts+1]="..."; break end
+        parts[#parts+1]=tostring(k).."="..(type(v)=="table" and tblPreview(v,depth+1) or tostring(v))
     end
-    return "{" .. table.concat(parts, ", ") .. "}"
+    return "{"..table.concat(parts,", ").."}"
+end
+
+local function getPath(obj)
+    local p=obj.Name; local cur=obj.Parent
+    while cur and cur~=game do p=cur.Name.."/"..p; cur=cur.Parent end
+    return p
 end
 
 --------------------------------------------------
--- FULL CLEANUP
+-- WEBHOOK
 --------------------------------------------------
-if _G.LumiWare_Cleanup then
-    pcall(_G.LumiWare_Cleanup)
+local function sendWebhook(embed, content)
+    if Webhook.url=="" then return end
+    pcall(function()
+        local pl={username="LumiWare",embeds={embed}}
+        if content then pl.content=content end
+        local body=Svc.Http:JSONEncode(pl)
+        local fn=(syn and syn.request) or (http and http.request) or request or http_request
+        if fn then fn({Url=Webhook.url,Method="POST",Headers={["Content-Type"]="application/json"},Body=body}) end
+    end)
 end
 
-local allConnections = {}
-local function track(connection)
-    table.insert(allConnections, connection)
-    return connection
+local function rarityTier(name)
+    local l=name:lower()
+    local sr={"duskit","ikazune","mutagon","protogon","metronette","wabalisc",
+        "cephalops","elephage","gargolem","celesting","nyxre","odasho","cosmiore","nevermare","akhalos"}
+    for _,r in ipairs(sr) do if l:find(r) then return "SUPER RARE" end end
+    if l:find("gamma")  then return "GAMMA RARE" end
+    if l:find("gleam")  then return "GLEAMING RARE" end
+    if l:find("corrupt")then return "CORRUPT" end
+    if l:find("sa ") or l:find("secret") then return "SECRET ABILITY" end
+    return "RARE"
 end
 
-_G.LumiWare_Cleanup = function()
-    for _, conn in ipairs(allConnections) do
-        pcall(function() conn:Disconnect() end)
-    end
-    allConnections = {}
+local function webhookRare(name,lv,gender,enc,hTime)
+    local rt=rarityTier(name)
+    sendWebhook({title="⭐ "..rt.." FOUND!",description="**"..name.."** detected!",color=16766720,
+        fields={{name="Rarity",value=rt,inline=true},{name="Loomian",value=name,inline=true},
+            {name="Level",value=tostring(lv or "?"),inline=true},{name="Gender",value=gender or "?",inline=true},
+            {name="Encounters",value=tostring(enc),inline=true},{name="Hunt Time",value=hTime or "?",inline=true},
+            {name="Player",value=PLAYER_NAME,inline=true}},
+        footer={text="LumiWare "..VERSION.." • "..os.date("%X")}},
+    "@everyone")
+end
+
+local function webhookSession(enc,hTime,rares)
+    sendWebhook({title="📊 Session Summary",color=7930367,
+        fields={{name="Encounters",value=tostring(enc),inline=true},
+            {name="Hunt Time",value=hTime,inline=true},{name="Rares",value=tostring(rares),inline=true},
+            {name="Player",value=PLAYER_NAME,inline=true}},
+        footer={text="LumiWare "..VERSION.." • "..os.date("%X")}})
+end
+
+--------------------------------------------------
+-- CLEANUP
+--------------------------------------------------
+if _G.LumiWare_Cleanup then pcall(_G.LumiWare_Cleanup) end
+
+local allConns={}
+local function track(c) allConns[#allConns+1]=c; return c end
+
+_G.LumiWare_Cleanup=function()
+    for _,c in ipairs(allConns) do pcall(function() c:Disconnect() end) end
+    allConns={}
     pcall(function()
         if _G.LumiWare_Threads then
-            for _, th in ipairs(_G.LumiWare_Threads) do task.cancel(th) end
-            _G.LumiWare_Threads = {}
+            for _,t in ipairs(_G.LumiWare_Threads) do task.cancel(t) end
+            _G.LumiWare_Threads={}
         end
     end)
     pcall(function()
-        if _G.LumiWare_WalkThread then
-            task.cancel(_G.LumiWare_WalkThread)
-            _G.LumiWare_WalkThread = nil
+        if _G.LumiWare_WalkThread then task.cancel(_G.LumiWare_WalkThread); _G.LumiWare_WalkThread=nil end
+    end)
+    pcall(function() _G.LumiWare_StopFlag=true end)
+    pcall(function()
+        for _,v in pairs(player:WaitForChild("PlayerGui"):GetChildren()) do
+            if v.Name:find("LumiWare_Hub") or v.Name=="BattleLoomianViewer" then v:Destroy() end
         end
     end)
     pcall(function()
-        if _G.LumiWare_StopFlag then _G.LumiWare_StopFlag = true end
-    end)
-    pcall(function()
-        for _, v in pairs(player:WaitForChild("PlayerGui"):GetChildren()) do
-            if string.find(v.Name, "LumiWare_Hub") or v.Name == "BattleLoomianViewer" then v:Destroy() end
+        for _,v in pairs(Svc.CoreGui:GetChildren()) do
+            if v.Name:find("LumiWare_Hub") or v.Name=="BattleLoomianViewer" then v:Destroy() end
         end
     end)
-    pcall(function()
-        for _, v in pairs(CoreGui:GetChildren()) do
-            if string.find(v.Name, "LumiWare_Hub") or v.Name == "BattleLoomianViewer" then v:Destroy() end
-        end
-    end)
-    pcall(function()
-        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.LeftShift, false, game)
-    end)
+    pcall(function() Svc.VIM:SendKeyEvent(false,Enum.KeyCode.LeftShift,false,game) end)
 end
 
-local guiName = "LumiWare_Hub_" .. tostring(math.random(1000, 9999))
-for _, v in pairs(player:WaitForChild("PlayerGui"):GetChildren()) do
-    if string.find(v.Name, "LumiWare_Hub") or v.Name == "BattleLoomianViewer" then v:Destroy() end
-end
-pcall(function()
-    for _, v in pairs(CoreGui:GetChildren()) do
-        if string.find(v.Name, "LumiWare_Hub") or v.Name == "BattleLoomianViewer" then v:Destroy() end
+do -- immediate cleanup of orphaned GUIs
+    for _,v in pairs(player:WaitForChild("PlayerGui"):GetChildren()) do
+        if v.Name:find("LumiWare_Hub") or v.Name=="BattleLoomianViewer" then v:Destroy() end
     end
-end)
+    pcall(function()
+        for _,v in pairs(Svc.CoreGui:GetChildren()) do
+            if v.Name:find("LumiWare_Hub") or v.Name=="BattleLoomianViewer" then v:Destroy() end
+        end
+    end)
+end
 
-_G.LumiWare_StopFlag = false
-_G.LumiWare_Threads = {}
-
-local gui = Instance.new("ScreenGui")
-gui.Name = guiName
-gui.ResetOnSpawn = false
-gui.IgnoreGuiInset = true
-local ok = pcall(function() gui.Parent = CoreGui end)
-if not ok then gui.Parent = player:WaitForChild("PlayerGui") end
+_G.LumiWare_StopFlag=false
+_G.LumiWare_Threads={}
 
 --------------------------------------------------
+-- GUI SETUP
+--------------------------------------------------
+local gui=Instance.new("ScreenGui")
+gui.Name="LumiWare_Hub_"..tostring(math.random(1000,9999))
+gui.ResetOnSpawn=false; gui.IgnoreGuiInset=true
+if not pcall(function() gui.Parent=Svc.CoreGui end) then gui.Parent=player:WaitForChild("PlayerGui") end
+
 -- THEME
---------------------------------------------------
-local C = {
-    BG = Color3.fromRGB(13, 13, 18), TopBar = Color3.fromRGB(20, 20, 28),
-    Accent = Color3.fromRGB(110, 80, 255), AccentDim = Color3.fromRGB(75, 55, 180),
-    Text = Color3.fromRGB(245, 245, 250), TextDim = Color3.fromRGB(150, 150, 165),
-    Panel = Color3.fromRGB(20, 20, 26), PanelAlt = Color3.fromRGB(26, 26, 34),
-    Gold = Color3.fromRGB(255, 210, 50), Green = Color3.fromRGB(60, 215, 120),
-    Red = Color3.fromRGB(255, 75, 90), Wild = Color3.fromRGB(70, 190, 255),
-    Trainer = Color3.fromRGB(255, 150, 60), Orange = Color3.fromRGB(255, 150, 60),
-    Cyan = Color3.fromRGB(70, 190, 255), Pink = Color3.fromRGB(255, 100, 200),
-    Teal = Color3.fromRGB(50, 220, 190),
+local C={
+    BG=Color3.fromRGB(13,13,18), Top=Color3.fromRGB(20,20,28),
+    Accent=Color3.fromRGB(110,80,255), AccentDim=Color3.fromRGB(75,55,180),
+    Text=Color3.fromRGB(245,245,250), Dim=Color3.fromRGB(150,150,165),
+    Panel=Color3.fromRGB(20,20,26), PanelAlt=Color3.fromRGB(26,26,34),
+    Gold=Color3.fromRGB(255,210,50), Green=Color3.fromRGB(60,215,120),
+    Red=Color3.fromRGB(255,75,90), Wild=Color3.fromRGB(70,190,255),
+    Trainer=Color3.fromRGB(255,150,60), Cyan=Color3.fromRGB(70,190,255),
+    Pink=Color3.fromRGB(255,100,200), Teal=Color3.fromRGB(50,220,190),
 }
 
-local function createShadow(parent, radius, offset)
-    local shadow = Instance.new("ImageLabel", parent)
-    shadow.Name = "Shadow"
-    shadow.BackgroundTransparency = 1
-    shadow.Image = "rbxassetid://1316045217"
-    shadow.ImageColor3 = Color3.new(0, 0, 0)
-    shadow.ImageTransparency = 0.5
-    shadow.ScaleType = Enum.ScaleType.Slice
-    shadow.SliceCenter = Rect.new(10, 10, 118, 118)
-    shadow.Position = UDim2.new(0, -radius + offset.X, 0, -radius + offset.Y)
-    shadow.Size = UDim2.new(1, radius * 2, 1, radius * 2)
-    shadow.ZIndex = parent.ZIndex - 1
-    return shadow
+-- UI factory helpers (these are functions, not locals for each widget)
+local function corner(p,r) Instance.new("UICorner",p).CornerRadius=UDim.new(0,r or 8) end
+local function lbl(p,props)
+    local l=Instance.new("TextLabel",p)
+    l.BackgroundTransparency=1
+    for k,v in pairs(props) do l[k]=v end
+    return l
+end
+local function btn(p,props)
+    local b=Instance.new("TextButton",p)
+    b.BorderSizePixel=0
+    for k,v in pairs(props) do b[k]=v end
+    return b
+end
+local function box(p,props)
+    local b=Instance.new("TextBox",p)
+    b.BorderSizePixel=0; b.ClearTextOnFocus=false
+    for k,v in pairs(props) do b[k]=v end
+    return b
+end
+local function frame(p,props)
+    local f=Instance.new("Frame",p)
+    f.BorderSizePixel=0
+    for k,v in pairs(props) do f[k]=v end
+    return f
+end
+local function scroll(p,props)
+    local s=Instance.new("ScrollingFrame",p)
+    s.BorderSizePixel=0; s.ScrollBarThickness=4; s.ScrollBarImageColor3=C.AccentDim
+    s.AutomaticCanvasSize=Enum.AutomaticSize.Y; s.CanvasSize=UDim2.new(0,0,0,0)
+    for k,v in pairs(props) do s[k]=v end
+    return s
+end
+local function listLayout(p,props)
+    local l=Instance.new("UIListLayout",p)
+    l.SortOrder=Enum.SortOrder.LayoutOrder
+    if props then for k,v in pairs(props) do l[k]=v end end
+    return l
+end
+local function hover(b,def,hov)
+    local ti=TweenInfo.new(0.2,Enum.EasingStyle.Quad,Enum.EasingDirection.Out)
+    track(b.MouseEnter:Connect(function() Svc.Tween:Create(b,ti,{BackgroundColor3=hov}):Play() end))
+    track(b.MouseLeave:Connect(function() Svc.Tween:Create(b,ti,{BackgroundColor3=def}):Play() end))
+end
+local function mkBtn(p,text,xOff,yOff,w,h,col)
+    local b=btn(p,{
+        Size=UDim2.fromOffset(w or 60,h or 22),
+        Position=UDim2.new(0,xOff,0,yOff),
+        BackgroundColor3=col or C.AccentDim,
+        Text=text, Font=Enum.Font.GothamBold, TextSize=10, TextColor3=C.Text,
+    })
+    corner(b,5); return b
 end
 
-local function addHoverEffect(button, defaultColor, hoverColor)
-    local tInfo = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-    track(button.MouseEnter:Connect(function()
-        TweenService:Create(button, tInfo, {BackgroundColor3 = hoverColor}):Play()
-    end))
-    track(button.MouseLeave:Connect(function()
-        TweenService:Create(button, tInfo, {BackgroundColor3 = defaultColor}):Play()
-    end))
+-- MAIN FRAME
+local mainFrame=Instance.new("CanvasGroup",gui)
+mainFrame.Size=UDim2.fromOffset(480,740)
+mainFrame.Position=UDim2.fromScale(0.5,0.5)
+mainFrame.AnchorPoint=Vector2.new(0.5,0.5)
+mainFrame.BackgroundColor3=C.BG
+mainFrame.BorderSizePixel=0
+mainFrame.GroupTransparency=1
+corner(mainFrame,12)
+
+do -- shadow + stroke
+    local sh=Instance.new("ImageLabel",mainFrame)
+    sh.BackgroundTransparency=1; sh.Image="rbxassetid://1316045217"
+    sh.ImageColor3=Color3.new(0,0,0); sh.ImageTransparency=0.5
+    sh.ScaleType=Enum.ScaleType.Slice; sh.SliceCenter=Rect.new(10,10,118,118)
+    sh.Position=UDim2.new(0,-12,0,-8); sh.Size=UDim2.new(1,30,1,30); sh.ZIndex=0
+    local sk=Instance.new("UIStroke",mainFrame)
+    sk.Color=C.Accent; sk.Thickness=1.5; sk.Transparency=0.5
 end
 
---------------------------------------------------
--- MAIN FRAME (wider to fit 4 tabs)
---------------------------------------------------
-local mainFrame = Instance.new("CanvasGroup")
-mainFrame.Size = UDim2.fromOffset(480, 740)
-mainFrame.Position = UDim2.fromScale(0.5, 0.5)
-mainFrame.AnchorPoint = Vector2.new(0.5, 0.5)
-mainFrame.BackgroundColor3 = C.BG
-mainFrame.BorderSizePixel = 0
-mainFrame.ClipsDescendants = false
-mainFrame.Parent = gui
-mainFrame.GroupTransparency = 1
-local mainScale = Instance.new("UIScale", mainFrame)
-mainScale.Scale = 0.9
-
-Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 12)
-createShadow(mainFrame, 15, Vector2.new(0, 4))
-local stroke = Instance.new("UIStroke", mainFrame)
-stroke.Color = C.Accent
-stroke.Thickness = 1.5
-stroke.Transparency = 0.5
+local mainScale=Instance.new("UIScale",mainFrame); mainScale.Scale=0.9
 
 -- SPLASH
-local splashFrame = Instance.new("Frame", mainFrame)
-splashFrame.Size = UDim2.fromScale(1, 1)
-splashFrame.BackgroundTransparency = 0
-splashFrame.BackgroundColor3 = C.BG
-splashFrame.ZIndex = 100
-Instance.new("UICorner", splashFrame).CornerRadius = UDim.new(0, 12)
-local splashGrad = Instance.new("UIGradient", splashFrame)
-splashGrad.Color = ColorSequence.new{
-    ColorSequenceKeypoint.new(0, C.AccentDim),
-    ColorSequenceKeypoint.new(1, C.BG)
-}
-splashGrad.Rotation = 90
-
-local splashLogo = Instance.new("TextLabel", splashFrame)
-splashLogo.Size = UDim2.fromScale(1, 1)
-splashLogo.BackgroundTransparency = 1
-splashLogo.Text = "⚡ LumiWare " .. VERSION
-splashLogo.Font = Enum.Font.GothamBlack
-splashLogo.TextSize = 34
-splashLogo.TextColor3 = C.Text
-splashLogo.ZIndex = 101
-
-local splashUIScale = Instance.new("UIScale", splashLogo)
-splashUIScale.Scale = 0.8
-
-task.spawn(function()
-    TweenService:Create(mainFrame, TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {GroupTransparency = 0}):Play()
-    TweenService:Create(splashUIScale, TweenInfo.new(1.2, Enum.EasingStyle.Exponential, Enum.EasingDirection.Out), {Scale = 1.05}):Play()
-    task.wait(1.5)
-    TweenService:Create(splashFrame, TweenInfo.new(0.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {BackgroundTransparency = 1}):Play()
-    TweenService:Create(splashLogo, TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {TextTransparency = 1}):Play()
-    TweenService:Create(mainScale, TweenInfo.new(0.6, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Scale = 1}):Play()
-    task.wait(0.6)
-    splashFrame:Destroy()
-end)
+do
+    local splash=frame(mainFrame,{Size=UDim2.fromScale(1,1),BackgroundColor3=C.BG,ZIndex=100})
+    corner(splash,12)
+    local sg=Instance.new("UIGradient",splash)
+    sg.Color=ColorSequence.new{ColorSequenceKeypoint.new(0,C.AccentDim),ColorSequenceKeypoint.new(1,C.BG)}
+    sg.Rotation=90
+    local sl=lbl(splash,{Size=UDim2.fromScale(1,1),Text="⚡ LumiWare "..VERSION,
+        Font=Enum.Font.GothamBlack,TextSize=34,TextColor3=C.Text,ZIndex=101})
+    local ss=Instance.new("UIScale",sl); ss.Scale=0.8
+    task.spawn(function()
+        Svc.Tween:Create(mainFrame,TweenInfo.new(0.4,Enum.EasingStyle.Quad,Enum.EasingDirection.Out),{GroupTransparency=0}):Play()
+        Svc.Tween:Create(ss,TweenInfo.new(1.2,Enum.EasingStyle.Exponential,Enum.EasingDirection.Out),{Scale=1.05}):Play()
+        task.wait(1.5)
+        Svc.Tween:Create(splash,TweenInfo.new(0.6,Enum.EasingStyle.Sine),{BackgroundTransparency=1}):Play()
+        Svc.Tween:Create(sl,TweenInfo.new(0.4),{TextTransparency=1}):Play()
+        Svc.Tween:Create(mainScale,TweenInfo.new(0.6,Enum.EasingStyle.Back,Enum.EasingDirection.Out),{Scale=1}):Play()
+        task.wait(0.6); splash:Destroy()
+    end)
+end
 
 -- TOPBAR
-local topbar = Instance.new("Frame", mainFrame)
-topbar.Size = UDim2.new(1, 0, 0, 36)
-topbar.BackgroundColor3 = C.TopBar
-topbar.BorderSizePixel = 0
-Instance.new("UICorner", topbar).CornerRadius = UDim.new(0, 10)
-local topFill = Instance.new("Frame", topbar)
-topFill.Size = UDim2.new(1, 0, 0, 10)
-topFill.Position = UDim2.new(0, 0, 1, -10)
-topFill.BackgroundColor3 = C.TopBar
-topFill.BorderSizePixel = 0
+local topbar=frame(mainFrame,{Size=UDim2.new(1,0,0,36),BackgroundColor3=C.Top})
+corner(topbar,10)
+frame(topbar,{Size=UDim2.new(1,0,0,10),Position=UDim2.new(0,0,1,-10),BackgroundColor3=C.Top})
+lbl(topbar,{Size=UDim2.new(1,-80,1,0),Position=UDim2.new(0,12,0,0),
+    Text="⚡ LumiWare "..VERSION,Font=Enum.Font.GothamBold,TextSize=15,
+    TextColor3=C.Accent,TextXAlignment=Enum.TextXAlignment.Left})
 
-local titleLbl = Instance.new("TextLabel", topbar)
-titleLbl.Size = UDim2.new(1, -80, 1, 0)
-titleLbl.Position = UDim2.new(0, 12, 0, 0)
-titleLbl.BackgroundTransparency = 1
-titleLbl.Text = "⚡ LumiWare " .. VERSION
-titleLbl.Font = Enum.Font.GothamBold
-titleLbl.TextSize = 15
-titleLbl.TextColor3 = C.Accent
-titleLbl.TextXAlignment = Enum.TextXAlignment.Left
+local minBtn=btn(topbar,{Size=UDim2.fromOffset(28,28),Position=UDim2.new(1,-66,0,4),
+    BackgroundColor3=C.PanelAlt,Text="–",Font=Enum.Font.GothamBold,TextSize=18,TextColor3=C.Text})
+corner(minBtn,6); hover(minBtn,C.PanelAlt,C.AccentDim)
 
-local minBtn = Instance.new("TextButton", topbar)
-minBtn.Size = UDim2.fromOffset(28, 28)
-minBtn.Position = UDim2.new(1, -66, 0, 4)
-minBtn.BackgroundColor3 = C.PanelAlt
-minBtn.Text = "–"
-minBtn.Font = Enum.Font.GothamBold
-minBtn.TextSize = 18
-minBtn.TextColor3 = C.Text
-minBtn.BorderSizePixel = 0
-Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0, 6)
-addHoverEffect(minBtn, C.PanelAlt, C.AccentDim)
-
-local closeBtn = Instance.new("TextButton", topbar)
-closeBtn.Size = UDim2.fromOffset(28, 28)
-closeBtn.Position = UDim2.new(1, -34, 0, 4)
-closeBtn.BackgroundColor3 = C.PanelAlt
-closeBtn.Text = "×"
-closeBtn.Font = Enum.Font.GothamBold
-closeBtn.TextSize = 18
-closeBtn.TextColor3 = C.Text
-closeBtn.BorderSizePixel = 0
-Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 6)
-addHoverEffect(closeBtn, C.PanelAlt, C.Red)
-
+local closeBtn=btn(topbar,{Size=UDim2.fromOffset(28,28),Position=UDim2.new(1,-34,0,4),
+    BackgroundColor3=C.PanelAlt,Text="×",Font=Enum.Font.GothamBold,TextSize=18,TextColor3=C.Text})
+corner(closeBtn,6); hover(closeBtn,C.PanelAlt,C.Red)
 closeBtn.MouseButton1Click:Connect(function()
-    local elapsed = tick() - huntStartTime
-    sendSessionWebhook(encounterCount, formatTime(elapsed), raresFoundCount)
+    webhookSession(State.encounterCount,fmtTime(tick()-State.huntStart),State.raresFound)
     gui:Destroy()
 end)
 
 -- Drag
-local dragging, dragInput, dragStart, startPos
-track(topbar.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-        dragging = true; dragStart = input.Position; startPos = mainFrame.Position
-        track(input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then dragging = false end end))
-    end
-end))
-track(topbar.InputChanged:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then dragInput = input end
-end))
-track(UserInputService.InputChanged:Connect(function(input)
-    if input == dragInput and dragging then
-        local d = input.Position - dragStart
-        mainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
-    end
-end))
-
---------------------------------------------------
--- TAB BAR (4 tabs now)
---------------------------------------------------
-local tabBar = Instance.new("Frame", mainFrame)
-tabBar.Size = UDim2.new(1, -16, 0, 30)
-tabBar.Position = UDim2.new(0, 8, 0, 44)
-tabBar.BackgroundTransparency = 1
-local tabLayout = Instance.new("UIListLayout", tabBar)
-tabLayout.FillDirection = Enum.FillDirection.Horizontal
-tabLayout.HorizontalAlignment = Enum.HorizontalAlignment.Left
-tabLayout.VerticalAlignment = Enum.VerticalAlignment.Center
-tabLayout.Padding = UDim.new(0, 4)
-
-local function mkTabBtn(parent, text)
-    local b = Instance.new("TextButton", parent)
-    b.Size = UDim2.new(0.25, -3, 1, 0)
-    b.BackgroundColor3 = C.PanelAlt
-    b.Text = text
-    b.Font = Enum.Font.GothamBold
-    b.TextSize = 10
-    b.TextColor3 = C.TextDim
-    b.BorderSizePixel = 0
-    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
-    return b
+do
+    local dragging,dragInput,dragStart,startPos
+    track(topbar.InputBegan:Connect(function(input)
+        if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then
+            dragging=true; dragStart=input.Position; startPos=mainFrame.Position
+            track(input.Changed:Connect(function() if input.UserInputState==Enum.UserInputState.End then dragging=false end end))
+        end
+    end))
+    track(topbar.InputChanged:Connect(function(input)
+        if input.UserInputType==Enum.UserInputType.MouseMovement or input.UserInputType==Enum.UserInputType.Touch then dragInput=input end
+    end))
+    track(Svc.UIS.InputChanged:Connect(function(input)
+        if input==dragInput and dragging then
+            local d=input.Position-dragStart
+            mainFrame.Position=UDim2.new(startPos.X.Scale,startPos.X.Offset+d.X,startPos.Y.Scale,startPos.Y.Offset+d.Y)
+        end
+    end))
 end
 
-local huntTabBtn = mkTabBtn(tabBar, "🗡️ HUNT")
-local masteryTabBtn = mkTabBtn(tabBar, "📖 MASTERY")
-local healTabBtn = mkTabBtn(tabBar, "💊 HEAL")
-local cfgTabBtn = mkTabBtn(tabBar, "⚙️ CONFIG")
+-- TAB BAR
+local tabBar=frame(mainFrame,{Size=UDim2.new(1,-16,0,30),Position=UDim2.new(0,8,0,44),BackgroundTransparency=1})
+local tabLayout2=Instance.new("UIListLayout",tabBar)
+tabLayout2.FillDirection=Enum.FillDirection.Horizontal
+tabLayout2.VerticalAlignment=Enum.VerticalAlignment.Center
+tabLayout2.Padding=UDim.new(0,4)
 
--- CONTENT WRAPPER
-local contentContainer = Instance.new("Frame", mainFrame)
-contentContainer.Name = "ContentContainer"
-contentContainer.Size = UDim2.new(1, -16, 1, -82)
-contentContainer.Position = UDim2.new(0, 8, 0, 78)
-contentContainer.BackgroundTransparency = 1
+local function mkTabBtn(text)
+    local b=btn(tabBar,{Size=UDim2.new(0.25,-3,1,0),BackgroundColor3=C.PanelAlt,
+        Text=text,Font=Enum.Font.GothamBold,TextSize=10,TextColor3=C.Dim})
+    corner(b,6); return b
+end
+local Tabs={
+    huntBtn=mkTabBtn("🗡️ HUNT"),
+    mastBtn=mkTabBtn("📖 MASTERY"),
+    healBtn=mkTabBtn("💊 HEAL"),
+    cfgBtn =mkTabBtn("⚙️ CONFIG"),
+}
 
--- forward decl for addBattleLog
-local addBattleLog
+local contentWrap=frame(mainFrame,{Size=UDim2.new(1,-16,1,-82),Position=UDim2.new(0,8,0,78),BackgroundTransparency=1})
+
+-- forward-declare UI elements needed across sections
+local UI={}  -- stores all cross-referenced UI elements
 
 --==================================================
 -- MASTERY FRAME
 --==================================================
-local masteryFrame = Instance.new("Frame", contentContainer)
-masteryFrame.Size = UDim2.new(1, 0, 1, 0)
-masteryFrame.BackgroundTransparency = 1
-masteryFrame.Visible = false
+local mastFrame=frame(contentWrap,{Size=UDim2.fromScale(1,1),BackgroundTransparency=1,Visible=false})
+do
+    local msearch=box(mastFrame,{Size=UDim2.new(1,0,0,36),BackgroundColor3=C.Panel,
+        PlaceholderText="🔍 Search Loomian...",Font=Enum.Font.GothamBold,TextSize=13,
+        TextColor3=C.Text,PlaceholderColor3=C.Dim})
+    corner(msearch,6); Instance.new("UIPadding",msearch).PaddingLeft=UDim.new(0,12)
 
-local masterySearch = Instance.new("TextBox", masteryFrame)
-masterySearch.Size = UDim2.new(1, 0, 0, 36)
-masterySearch.BackgroundColor3 = C.Panel
-masterySearch.Text = ""
-masterySearch.PlaceholderText = "🔍 Search Loomian..."
-masterySearch.Font = Enum.Font.GothamBold
-masterySearch.TextSize = 13
-masterySearch.TextColor3 = C.Text
-masterySearch.BorderSizePixel = 0
-masterySearch.ClearTextOnFocus = false
-Instance.new("UICorner", masterySearch).CornerRadius = UDim.new(0, 6)
-local searchPadding = Instance.new("UIPadding", masterySearch)
-searchPadding.PaddingLeft = UDim.new(0, 12)
+    UI.sessionLbl=lbl(mastFrame,{Size=UDim2.new(1,0,0,22),Position=UDim2.new(0,0,0,44),
+        Text="Session: 0 KOs | 0.0k Damage",Font=Enum.Font.GothamBold,TextSize=11,TextColor3=C.Dim,
+        TextXAlignment=Enum.TextXAlignment.Left})
 
-local masterySessionPanel = Instance.new("Frame", masteryFrame)
-masterySessionPanel.Size = UDim2.new(1, 0, 0, 24)
-masterySessionPanel.Position = UDim2.new(0, 0, 0, 44)
-masterySessionPanel.BackgroundTransparency = 1
-local sessionLbl = Instance.new("TextLabel", masterySessionPanel)
-sessionLbl.Size = UDim2.new(1, 0, 1, 0)
-sessionLbl.BackgroundTransparency = 1
-sessionLbl.Text = "Session: 0 KOs | 0.0k Damage"
-sessionLbl.Font = Enum.Font.GothamBold
-sessionLbl.TextSize = 11
-sessionLbl.TextColor3 = C.TextDim
-sessionLbl.TextXAlignment = Enum.TextXAlignment.Left
+    local mscroll=scroll(mastFrame,{Size=UDim2.new(1,0,1,-74),Position=UDim2.new(0,0,0,74),
+        BackgroundTransparency=1,ScrollBarImageColor3=C.AccentDim})
+    listLayout(mscroll,{Padding=UDim.new(0,8)})
 
-local masteryScroll = Instance.new("ScrollingFrame", masteryFrame)
-masteryScroll.Size = UDim2.new(1, 0, 1, -76)
-masteryScroll.Position = UDim2.new(0, 0, 0, 76)
-masteryScroll.BackgroundTransparency = 1
-masteryScroll.BorderSizePixel = 0
-masteryScroll.ScrollBarThickness = 4
-masteryScroll.ScrollBarImageColor3 = C.AccentDim
-
-local masteryListLayout = Instance.new("UIListLayout", masteryScroll)
-masteryListLayout.SortOrder = Enum.SortOrder.LayoutOrder
-masteryListLayout.Padding = UDim.new(0, 8)
-
-local function renderMasteryFamily(data)
-    local card = Instance.new("Frame")
-    card.Size = UDim2.new(1, -8, 0, 110)
-    card.BackgroundColor3 = C.Panel
-    card.BorderSizePixel = 0
-    Instance.new("UICorner", card).CornerRadius = UDim.new(0, 6)
-    local familyName = Instance.new("TextLabel", card)
-    familyName.Size = UDim2.new(1, -16, 0, 24)
-    familyName.Position = UDim2.new(0, 8, 0, 4)
-    familyName.BackgroundTransparency = 1
-    familyName.Text = string.gsub(data.f, "/", " → ")
-    familyName.Font = Enum.Font.GothamBold
-    familyName.TextSize = 13
-    familyName.TextColor3 = C.Accent
-    familyName.TextXAlignment = Enum.TextXAlignment.Left
-    for i, t in ipairs(data.t) do
-        local typ, amt, rwd = t[1], t[2], t[3]
-        local taskRow = Instance.new("Frame", card)
-        taskRow.Size = UDim2.new(1, -16, 0, 18)
-        taskRow.Position = UDim2.new(0, 8, 0, 26 + (i-1)*20)
-        taskRow.BackgroundTransparency = 1
-        local checkLbl = Instance.new("TextLabel", taskRow)
-        checkLbl.Size = UDim2.new(0, 20, 1, 0)
-        checkLbl.BackgroundTransparency = 1
-        checkLbl.Text = "☐"
-        checkLbl.Font = Enum.Font.GothamBold
-        checkLbl.TextSize = 14
-        checkLbl.TextColor3 = C.TextDim
-        local descLbl = Instance.new("TextLabel", taskRow)
-        descLbl.Size = UDim2.new(1, -60, 1, 0)
-        descLbl.Position = UDim2.new(0, 24, 0, 0)
-        descLbl.BackgroundTransparency = 1
-        local taskName = TASK_NAMES[typ] or typ
-        if amt > 0 then taskName = string.gsub(taskName, "Loomians", amt .. " Loomians") end
-        if typ == "E" then taskName = "Earn " .. tostring(amt) .. " EXP" end
-        if typ == "D" and amt > 0 then taskName = "Discover " .. amt .. " stages" end
-        if typ == "R" then taskName = "Rally " .. amt .. " times" end
-        if typ == "DD" then taskName = "Deal " .. amt .. " Damage" end
-        if typ == "C" then taskName = "Capture " .. amt .. (amt==1 and " time" or " times") end
-        if typ == "DC" then taskName = "Deal " .. amt .. " Critical Hits" end
-        if typ == "LU" then taskName = "Level up " .. amt .. " times" end
-        descLbl.Text = taskName
-        descLbl.Font = Enum.Font.Gotham
-        descLbl.TextSize = 11
-        descLbl.TextColor3 = C.Text
-        descLbl.TextXAlignment = Enum.TextXAlignment.Left
-        local rewardLbl = Instance.new("TextLabel", taskRow)
-        rewardLbl.Size = UDim2.new(0, 40, 1, 0)
-        rewardLbl.Position = UDim2.new(1, -40, 0, 0)
-        rewardLbl.BackgroundTransparency = 1
-        rewardLbl.Text = tostring(rwd) .. " MP"
-        rewardLbl.Font = Enum.Font.GothamBold
-        rewardLbl.TextSize = 10
-        rewardLbl.TextColor3 = C.Gold
-        rewardLbl.TextXAlignment = Enum.TextXAlignment.Right
+    local function renderFamily(data)
+        local card=frame(mscroll,{Size=UDim2.new(1,-8,0,110),BackgroundColor3=C.Panel})
+        corner(card,6)
+        lbl(card,{Size=UDim2.new(1,-16,0,24),Position=UDim2.new(0,8,0,4),
+            Text=data.f:gsub("/","→"),Font=Enum.Font.GothamBold,TextSize=13,
+            TextColor3=C.Accent,TextXAlignment=Enum.TextXAlignment.Left})
+        for i,t in ipairs(data.t) do
+            local typ,amt,rwd=t[1],t[2],t[3]
+            local row=frame(card,{Size=UDim2.new(1,-16,0,18),Position=UDim2.new(0,8,0,26+(i-1)*20),BackgroundTransparency=1})
+            lbl(row,{Size=UDim2.fromOffset(20,18),Text="☐",Font=Enum.Font.GothamBold,TextSize=14,TextColor3=C.Dim})
+            local tn=TASK_NAMES[typ] or typ
+            if typ=="E" then tn="Earn "..amt.." EXP"
+            elseif typ=="D" and amt>0 then tn="Discover "..amt.." stages"
+            elseif typ=="R" then tn="Rally "..amt.." times"
+            elseif typ=="DD" then tn="Deal "..amt.." Damage"
+            elseif typ=="C" then tn="Capture "..amt..(amt==1 and " time" or " times")
+            elseif typ=="DC" then tn="Deal "..amt.." Critical Hits"
+            elseif typ=="LU" then tn="Level up "..amt.." times"
+            elseif typ=="K" then tn="KO "..amt.." Loomians" end
+            lbl(row,{Size=UDim2.new(1,-60,1,0),Position=UDim2.fromOffset(24,0),
+                Text=tn,Font=Enum.Font.Gotham,TextSize=11,TextColor3=C.Text,TextXAlignment=Enum.TextXAlignment.Left})
+            lbl(row,{Size=UDim2.fromOffset(40,18),Position=UDim2.new(1,-40,0,0),
+                Text=rwd.." MP",Font=Enum.Font.GothamBold,TextSize=10,TextColor3=C.Gold,
+                TextXAlignment=Enum.TextXAlignment.Right})
+        end
+        return card
     end
-    return card
-end
 
-local function populateMasteryList(query)
-    for _, v in ipairs(masteryScroll:GetChildren()) do
-        if v:IsA("Frame") then v:Destroy() end
+    local function populate(query)
+        for _,v in ipairs(mscroll:GetChildren()) do if v:IsA("Frame") then v:Destroy() end end
+        local res=searchMastery(query)
+        local n=0
+        for i=1,math.min(#res,50) do renderFamily(res[i]).Parent=mscroll; n=n+1 end
+        mscroll.CanvasSize=UDim2.new(0,0,0,n*118)
     end
-    local results = searchMastery(query)
-    if not query or query == "" then results = MASTERY_DATA end
-    local count = 0
-    for i = 1, math.min(#results, 50) do
-        local card = renderMasteryFamily(results[i])
-        card.Parent = masteryScroll
-        count = count + 1
-    end
-    masteryScroll.CanvasSize = UDim2.new(0, 0, 0, count * 118)
+    msearch:GetPropertyChangedSignal("Text"):Connect(function() populate(msearch.Text) end)
+    populate("")
 end
-
-masterySearch:GetPropertyChangedSignal("Text"):Connect(function()
-    populateMasteryList(masterySearch.Text)
-end)
-populateMasteryList("")
 
 --==================================================
--- CONFIG TAB FRAME (NEW)
+-- CONFIG FRAME
 --==================================================
-local cfgFrame = Instance.new("ScrollingFrame", contentContainer)
-cfgFrame.Size = UDim2.new(1, 0, 1, 0)
-cfgFrame.BackgroundTransparency = 1
-cfgFrame.BorderSizePixel = 0
-cfgFrame.ScrollBarThickness = 4
-cfgFrame.ScrollBarImageColor3 = C.AccentDim
-cfgFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
-cfgFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
-cfgFrame.Visible = false
-local cfgLayout = Instance.new("UIListLayout", cfgFrame)
-cfgLayout.SortOrder = Enum.SortOrder.LayoutOrder
-cfgLayout.Padding = UDim.new(0, 8)
+local cfgFrame2=scroll(contentWrap,{Size=UDim2.fromScale(1,1),BackgroundTransparency=1,Visible=false,ScrollBarImageColor3=C.AccentDim})
+listLayout(cfgFrame2,{Padding=UDim.new(0,8)})
 
-local function mkCfgSection(parent, title, color)
-    local sec = Instance.new("Frame", parent)
-    sec.Size = UDim2.new(1, -8, 0, 0)
-    sec.BackgroundColor3 = C.Panel
-    sec.BorderSizePixel = 0
-    Instance.new("UICorner", sec).CornerRadius = UDim.new(0, 8)
-    local hdr = Instance.new("TextLabel", sec)
-    hdr.Size = UDim2.new(1, -16, 0, 28)
-    hdr.Position = UDim2.new(0, 8, 0, 0)
-    hdr.BackgroundTransparency = 1
-    hdr.Text = title
-    hdr.Font = Enum.Font.GothamBold
-    hdr.TextSize = 12
-    hdr.TextColor3 = color or C.Accent
-    hdr.TextXAlignment = Enum.TextXAlignment.Left
-    return sec, hdr
+-- helper to make a section card
+local function cfgSection(title,h,titleColor)
+    local sec=frame(cfgFrame2,{Size=UDim2.new(1,-8,0,h),BackgroundColor3=C.Panel})
+    corner(sec,8)
+    lbl(sec,{Size=UDim2.new(1,-16,0,26),Position=UDim2.new(0,8,0,2),
+        Text=title,Font=Enum.Font.GothamBold,TextSize=12,TextColor3=titleColor or C.Accent,
+        TextXAlignment=Enum.TextXAlignment.Left})
+    return sec
+end
+local function cfgRowVal(parent,yOff,labelText,valText,valColor)
+    local f=frame(parent,{Size=UDim2.new(1,-16,0,20),Position=UDim2.new(0,8,0,yOff),BackgroundTransparency=1})
+    lbl(f,{Size=UDim2.new(0.6,0,1,0),Text=labelText,Font=Enum.Font.Gotham,TextSize=11,TextColor3=C.Dim,TextXAlignment=Enum.TextXAlignment.Left})
+    local v=lbl(f,{Size=UDim2.new(0.4,0,1,0),Position=UDim2.new(0.6,0,0,0),Text=tostring(valText),
+        Font=Enum.Font.GothamBold,TextSize=11,TextColor3=valColor or C.Text,TextXAlignment=Enum.TextXAlignment.Right})
+    return v
 end
 
-local function mkCfgRow(parent, yOff, label, value, color)
-    local row = Instance.new("Frame", parent)
-    row.Size = UDim2.new(1, -16, 0, 22)
-    row.Position = UDim2.new(0, 8, 0, yOff)
-    row.BackgroundTransparency = 1
-    local lbl = Instance.new("TextLabel", row)
-    lbl.Size = UDim2.new(0.6, 0, 1, 0)
-    lbl.BackgroundTransparency = 1
-    lbl.Text = label
-    lbl.Font = Enum.Font.Gotham
-    lbl.TextSize = 11
-    lbl.TextColor3 = C.TextDim
-    lbl.TextXAlignment = Enum.TextXAlignment.Left
-    local val = Instance.new("TextLabel", row)
-    val.Name = "Value"
-    val.Size = UDim2.new(0.4, 0, 1, 0)
-    val.Position = UDim2.new(0.6, 0, 0, 0)
-    val.BackgroundTransparency = 1
-    val.Text = tostring(value)
-    val.Font = Enum.Font.GothamBold
-    val.TextSize = 11
-    val.TextColor3 = color or C.Text
-    val.TextXAlignment = Enum.TextXAlignment.Right
-    return row, val
-end
+-- Summary section
+local cfgSum=cfgSection("📋 CURRENT CONFIG",170,C.Accent)
+UI.cfgAutoModeVal    = cfgRowVal(cfgSum,30,"Wild Auto Mode:",cfg.autoMode,C.Green)
+UI.cfgTrainerModeVal = cfgRowVal(cfgSum,54,"Trainer Auto Mode:",cfg.trainerAutoMode,C.Trainer)
+UI.cfgWildSlotVal    = cfgRowVal(cfgSum,78,"Wild Move Slot:",cfg.autoMoveSlot,C.Text)
+UI.cfgTrainerSlotVal = cfgRowVal(cfgSum,102,"Trainer Move Slot:",cfg.trainerAutoMoveSlot,C.Text)
+UI.cfgHealVal        = cfgRowVal(cfgSum,126,"Auto-Heal:",cfg.autoHealEnabled and "ON" or "OFF",C.Teal)
+UI.cfgThreshVal      = cfgRowVal(cfgSum,150,"Heal Threshold:",cfg.autoHealThreshold.."%",C.Teal)
 
-local function mkSmallBtn(parent, text, xOff, yOff, w, h, col)
-    local b = Instance.new("TextButton", parent)
-    b.Size = UDim2.fromOffset(w or 80, h or 22)
-    b.Position = UDim2.new(0, xOff, 0, yOff)
-    b.BackgroundColor3 = col or C.AccentDim
-    b.Text = text
-    b.Font = Enum.Font.GothamBold
-    b.TextSize = 10
-    b.TextColor3 = C.Text
-    b.BorderSizePixel = 0
-    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 5)
-    return b
-end
+-- Webhook section
+local cfgWh=cfgSection("📡 WEBHOOK",96,C.Cyan)
+local cfgWhInput=box(cfgWh,{Size=UDim2.new(1,-72,0,24),Position=UDim2.new(0,8,0,30),
+    BackgroundColor3=C.PanelAlt,Text=cfg.webhookUrl or "",PlaceholderText="Discord webhook URL...",
+    Font=Enum.Font.Gotham,TextSize=10,TextColor3=C.Text,TextXAlignment=Enum.TextXAlignment.Left})
+corner(cfgWhInput,5); Instance.new("UIPadding",cfgWhInput).PaddingLeft=UDim.new(0,6)
+local cfgWhSave=mkBtn(cfgWh,"SAVE",0,30,60,24,C.Cyan)
+cfgWhSave.Position=UDim2.new(1,-68,0,30); cfgWhSave.TextColor3=C.BG
+local cfgPingInput=box(cfgWh,{Size=UDim2.new(1,-16,0,20),Position=UDim2.new(0,8,0,60),
+    BackgroundColor3=C.PanelAlt,PlaceholderText="Ping IDs e.g. <@12345> or @everyone",
+    Text=cfg.pingIds or "",Font=Enum.Font.Gotham,TextSize=9,TextColor3=C.Text,TextXAlignment=Enum.TextXAlignment.Left})
+corner(cfgPingInput,5); Instance.new("UIPadding",cfgPingInput).PaddingLeft=UDim.new(0,6)
 
--- Section 1: Current Config Summary
-local cfgSummSec, _ = mkCfgSection(cfgFrame, "📋 CURRENT CONFIG", C.Accent)
-cfgSummSec.Size = UDim2.new(1, -8, 0, 200)
+-- Custom rares
+local cfgRareSec=cfgSection("⭐ CUSTOM RARES",80,C.Gold)
+local cfgRareInput=box(cfgRareSec,{Size=UDim2.new(1,-100,0,24),Position=UDim2.new(0,8,0,30),
+    BackgroundColor3=C.PanelAlt,PlaceholderText="e.g. Twilat, Cathorn...",
+    Font=Enum.Font.Gotham,TextSize=11,TextColor3=C.Text,TextXAlignment=Enum.TextXAlignment.Left})
+corner(cfgRareInput,5); Instance.new("UIPadding",cfgRareInput).PaddingLeft=UDim.new(0,6)
+local cfgRareAdd  = mkBtn(cfgRareSec,"+ ADD",  0,30,42,24,C.Green); cfgRareAdd.Position=UDim2.new(1,-90,0,30); cfgRareAdd.TextColor3=C.BG
+local cfgRareClear= mkBtn(cfgRareSec,"CLEAR",  0,30,42,24,C.Red  ); cfgRareClear.Position=UDim2.new(1,-44,0,30)
+UI.cfgRareCountLbl=lbl(cfgRareSec,{Size=UDim2.new(1,-16,0,18),Position=UDim2.new(0,8,0,58),
+    Font=Enum.Font.Gotham,TextSize=10,TextColor3=C.Dim,TextXAlignment=Enum.TextXAlignment.Left})
 
-local cfgAutoModeRow, cfgAutoModeVal = mkCfgRow(cfgSummSec, 30, "Wild Auto Mode:", config.autoMode, C.Green)
-local cfgTrainerModeRow, cfgTrainerModeVal = mkCfgRow(cfgSummSec, 56, "Trainer Auto Mode:", config.trainerAutoMode, C.Orange)
-local cfgWildSlotRow, cfgWildSlotVal = mkCfgRow(cfgSummSec, 82, "Wild Move Slot:", config.autoMoveSlot, C.Text)
-local cfgTrainerSlotRow, cfgTrainerSlotVal = mkCfgRow(cfgSummSec, 108, "Trainer Move Slot:", config.trainerAutoMoveSlot, C.Text)
-local cfgHealRow, cfgHealVal = mkCfgRow(cfgSummSec, 134, "Auto-Heal:", config.autoHealEnabled and "ON" or "OFF", C.Teal)
-local cfgThreshRow, cfgThreshVal = mkCfgRow(cfgSummSec, 160, "Heal Threshold:", config.autoHealThreshold .. "%", C.Teal)
+-- Save/Reset
+local cfgSaveSec=cfgSection("💾 SAVE / RESET",76,C.Green)
+local cfgSaveBtn =mkBtn(cfgSaveSec,"💾 SAVE ALL",8,30,130,26,C.Green); cfgSaveBtn.TextColor3=C.BG; cfgSaveBtn.TextSize=11
+local cfgResetBtn=mkBtn(cfgSaveSec,"🔄 RESET",0,30,130,26,C.Red); cfgResetBtn.Position=UDim2.new(1,-138,0,30); cfgResetBtn.TextSize=11
+UI.cfgStatusLbl=lbl(cfgSaveSec,{Size=UDim2.new(1,-16,0,18),Position=UDim2.new(0,8,0,58),
+    Text="Config last saved: never",Font=Enum.Font.Gotham,TextSize=10,TextColor3=C.Dim,TextXAlignment=Enum.TextXAlignment.Left})
 
--- Section 2: Webhook Config
-local cfgWhSec, _ = mkCfgSection(cfgFrame, "📡 WEBHOOK CONFIG", C.Cyan)
-cfgWhSec.Size = UDim2.new(1, -8, 0, 96)
-
-local cfgWhInput = Instance.new("TextBox", cfgWhSec)
-cfgWhInput.Size = UDim2.new(1, -80, 0, 26)
-cfgWhInput.Position = UDim2.new(0, 8, 0, 30)
-cfgWhInput.BackgroundColor3 = C.PanelAlt
-cfgWhInput.BorderSizePixel = 0
-cfgWhInput.PlaceholderText = "Discord webhook URL..."
-cfgWhInput.Text = config.webhookUrl or ""
-cfgWhInput.Font = Enum.Font.Gotham
-cfgWhInput.TextSize = 10
-cfgWhInput.TextColor3 = C.Text
-cfgWhInput.ClearTextOnFocus = false
-cfgWhInput.TextXAlignment = Enum.TextXAlignment.Left
-Instance.new("UICorner", cfgWhInput).CornerRadius = UDim.new(0, 5)
-Instance.new("UIPadding", cfgWhInput).PaddingLeft = UDim.new(0, 6)
-
-local cfgWhSave = mkSmallBtn(cfgWhSec, "SAVE", 0, 30, 60, 26, C.Cyan)
-cfgWhSave.Position = UDim2.new(1, -68, 0, 30)
-cfgWhSave.TextColor3 = C.BG
-
-local cfgPingInput = Instance.new("TextBox", cfgWhSec)
-cfgPingInput.Size = UDim2.new(1, -16, 0, 22)
-cfgPingInput.Position = UDim2.new(0, 8, 0, 64)
-cfgPingInput.BackgroundColor3 = C.PanelAlt
-cfgPingInput.BorderSizePixel = 0
-cfgPingInput.PlaceholderText = "Ping user IDs (e.g. <@12345>) or @everyone"
-cfgPingInput.Text = config.pingIds or ""
-cfgPingInput.Font = Enum.Font.Gotham
-cfgPingInput.TextSize = 10
-cfgPingInput.TextColor3 = C.Text
-cfgPingInput.ClearTextOnFocus = false
-cfgPingInput.TextXAlignment = Enum.TextXAlignment.Left
-Instance.new("UICorner", cfgPingInput).CornerRadius = UDim.new(0, 5)
-Instance.new("UIPadding", cfgPingInput).PaddingLeft = UDim.new(0, 6)
-
--- Section 3: Custom Rares
-local cfgRareSec, _ = mkCfgSection(cfgFrame, "⭐ CUSTOM RARES", C.Gold)
-cfgRareSec.Size = UDim2.new(1, -8, 0, 80)
-
-local cfgRareInput = Instance.new("TextBox", cfgRareSec)
-cfgRareInput.Size = UDim2.new(1, -100, 0, 26)
-cfgRareInput.Position = UDim2.new(0, 8, 0, 30)
-cfgRareInput.BackgroundColor3 = C.PanelAlt
-cfgRareInput.BorderSizePixel = 0
-cfgRareInput.PlaceholderText = "e.g. Twilat, Cathorn..."
-cfgRareInput.Text = ""
-cfgRareInput.Font = Enum.Font.Gotham
-cfgRareInput.TextSize = 11
-cfgRareInput.TextColor3 = C.Text
-cfgRareInput.ClearTextOnFocus = false
-cfgRareInput.TextXAlignment = Enum.TextXAlignment.Left
-Instance.new("UICorner", cfgRareInput).CornerRadius = UDim.new(0, 5)
-Instance.new("UIPadding", cfgRareInput).PaddingLeft = UDim.new(0, 6)
-
-local cfgRareAdd = mkSmallBtn(cfgRareSec, "+ ADD", 0, 30, 42, 26, C.Green)
-cfgRareAdd.Position = UDim2.new(1, -90, 0, 30)
-cfgRareAdd.TextColor3 = C.BG
-local cfgRareClear = mkSmallBtn(cfgRareSec, "CLEAR", 0, 30, 42, 26, C.Red)
-cfgRareClear.Position = UDim2.new(1, -44, 0, 30)
-
-local cfgRareCountLbl = Instance.new("TextLabel", cfgRareSec)
-cfgRareCountLbl.Size = UDim2.new(1, -16, 0, 18)
-cfgRareCountLbl.Position = UDim2.new(0, 8, 0, 58)
-cfgRareCountLbl.BackgroundTransparency = 1
-cfgRareCountLbl.Font = Enum.Font.Gotham
-cfgRareCountLbl.TextSize = 10
-cfgRareCountLbl.TextColor3 = C.TextDim
-cfgRareCountLbl.TextXAlignment = Enum.TextXAlignment.Left
-
-local function updateRareCount()
-    cfgRareCountLbl.Text = #customRares .. " custom rares: " .. (
-        #customRares > 0 and table.concat(customRares, ", ") or "(none)"
-    )
-end
-updateRareCount()
-
--- Section 4: Save/Reset
-local cfgSaveSec, _ = mkCfgSection(cfgFrame, "💾 SAVE / RESET CONFIG", C.Green)
-cfgSaveSec.Size = UDim2.new(1, -8, 0, 80)
-
-local cfgSaveBtn = mkSmallBtn(cfgSaveSec, "💾 SAVE ALL", 8, 30, 130, 28, C.Green)
-cfgSaveBtn.TextColor3 = C.BG
-cfgSaveBtn.TextSize = 12
-local cfgResetBtn = mkSmallBtn(cfgSaveSec, "🔄 RESET DEFAULTS", 0, 30, 150, 28, C.Red)
-cfgResetBtn.Position = UDim2.new(1, -158, 0, 30)
-cfgResetBtn.TextSize = 11
-
-local cfgStatusLbl = Instance.new("TextLabel", cfgSaveSec)
-cfgStatusLbl.Size = UDim2.new(1, -16, 0, 18)
-cfgStatusLbl.Position = UDim2.new(0, 8, 0, 60)
-cfgStatusLbl.BackgroundTransparency = 1
-cfgStatusLbl.Text = "Config saved at: never"
-cfgStatusLbl.Font = Enum.Font.Gotham
-cfgStatusLbl.TextSize = 10
-cfgStatusLbl.TextColor3 = C.TextDim
-cfgStatusLbl.TextXAlignment = Enum.TextXAlignment.Left
-
--- Section 5: Bot Filters
-local cfgFilterSec, _ = mkCfgSection(cfgFrame, "🎯 BATTLE TYPE FILTER", C.Pink)
-cfgFilterSec.Size = UDim2.new(1, -8, 0, 80)
-
-local wildFilterBtn = mkSmallBtn(cfgFilterSec, "Wild: ON", 8, 30, 100, 26, automateWild and C.Wild or C.PanelAlt)
-local trainerFilterBtn = mkSmallBtn(cfgFilterSec, "Trainer: ON", 116, 30, 100, 26, automateTrainer and C.Trainer or C.PanelAlt)
-
-local cfgFilterLbl = Instance.new("TextLabel", cfgFilterSec)
-cfgFilterLbl.Size = UDim2.new(1, -16, 0, 18)
-cfgFilterLbl.Position = UDim2.new(0, 8, 0, 58)
-cfgFilterLbl.BackgroundTransparency = 1
-cfgFilterLbl.Text = "Controls which battle types trigger automation"
-cfgFilterLbl.Font = Enum.Font.Gotham
-cfgFilterLbl.TextSize = 10
-cfgFilterLbl.TextColor3 = C.TextDim
-cfgFilterLbl.TextXAlignment = Enum.TextXAlignment.Left
+-- Battle Filter
+local cfgFiltSec=cfgSection("🎯 BATTLE FILTER",76,C.Pink)
+UI.wildFilterBtn   =mkBtn(cfgFiltSec,"Wild: ON",8,30,100,24,Auto.wildOn and C.Wild or C.PanelAlt)
+UI.trainerFilterBtn=mkBtn(cfgFiltSec,"Trainer: ON",116,30,100,24,Auto.trainerOn and C.Trainer or C.PanelAlt)
+lbl(cfgFiltSec,{Size=UDim2.new(1,-16,0,18),Position=UDim2.new(0,8,0,56),
+    Text="Toggle which battle types trigger automation",Font=Enum.Font.Gotham,TextSize=10,TextColor3=C.Dim,TextXAlignment=Enum.TextXAlignment.Left})
 
 --==================================================
--- HEAL TAB FRAME (NEW v4.6)
+-- HEAL FRAME
 --==================================================
-local healFrame = Instance.new("ScrollingFrame", contentContainer)
-healFrame.Size = UDim2.new(1, 0, 1, 0)
-healFrame.BackgroundTransparency = 1
-healFrame.BorderSizePixel = 0
-healFrame.ScrollBarThickness = 4
-healFrame.ScrollBarImageColor3 = C.AccentDim
-healFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
-healFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
-healFrame.Visible = false
-local healTabLayout = Instance.new("UIListLayout", healFrame)
-healTabLayout.SortOrder = Enum.SortOrder.LayoutOrder
-healTabLayout.Padding = UDim.new(0, 8)
+local healFrame2=scroll(contentWrap,{Size=UDim2.fromScale(1,1),BackgroundTransparency=1,Visible=false,ScrollBarImageColor3=C.Teal})
+listLayout(healFrame2,{Padding=UDim.new(0,8)})
 
--- Section: Auto-Heal Toggle
-local healToggleSec = Instance.new("Frame", healFrame)
-healToggleSec.Size = UDim2.new(1, -8, 0, 90)
-healToggleSec.BackgroundColor3 = C.Panel
-healToggleSec.BorderSizePixel = 0
-Instance.new("UICorner", healToggleSec).CornerRadius = UDim.new(0, 8)
+local function healSection(title,h)
+    local s=frame(healFrame2,{Size=UDim2.new(1,-8,0,h),BackgroundColor3=C.Panel}); corner(s,8)
+    lbl(s,{Size=UDim2.new(1,-16,0,26),Position=UDim2.new(0,8,0,2),Text=title,
+        Font=Enum.Font.GothamBold,TextSize=12,TextColor3=C.Teal,TextXAlignment=Enum.TextXAlignment.Left})
+    return s
+end
 
-local healToggleLbl = Instance.new("TextLabel", healToggleSec)
-healToggleLbl.Size = UDim2.new(1, -16, 0, 24)
-healToggleLbl.Position = UDim2.new(0, 8, 0, 4)
-healToggleLbl.BackgroundTransparency = 1
-healToggleLbl.Text = "💊 AUTO-HEAL"
-healToggleLbl.Font = Enum.Font.GothamBold
-healToggleLbl.TextSize = 12
-healToggleLbl.TextColor3 = C.Teal
-healToggleLbl.TextXAlignment = Enum.TextXAlignment.Left
+-- Toggle
+local hTogSec=healSection("💊 AUTO-HEAL",90)
+UI.healOnBtn  = mkBtn(hTogSec,"ENABLE",  8,30,80,24,Heal.enabled and C.Teal or C.AccentDim)
+UI.healOffBtn = mkBtn(hTogSec,"DISABLE",96,30,80,24,not Heal.enabled and C.Red or C.AccentDim)
+lbl(hTogSec,{Size=UDim2.fromOffset(110,22),Position=UDim2.new(0,8,0,60),
+    Text="Heal when HP <",Font=Enum.Font.Gotham,TextSize=11,TextColor3=C.Dim,TextXAlignment=Enum.TextXAlignment.Left})
+UI.healThreshInput=box(hTogSec,{Size=UDim2.fromOffset(50,22),Position=UDim2.new(0,118,0,60),
+    BackgroundColor3=C.PanelAlt,Text=tostring(Heal.threshold),Font=Enum.Font.GothamBold,
+    TextSize=12,TextColor3=C.Teal,TextXAlignment=Enum.TextXAlignment.Center})
+corner(UI.healThreshInput,5)
+lbl(hTogSec,{Size=UDim2.fromOffset(16,22),Position=UDim2.new(0,172,0,60),
+    Text="%",Font=Enum.Font.GothamBold,TextSize=12,TextColor3=C.Teal})
 
-local healOnBtn = mkSmallBtn(healToggleSec, "ENABLE", 8, 30, 80, 26, autoHealEnabled and C.Teal or C.AccentDim)
-local healOffBtn = mkSmallBtn(healToggleSec, "DISABLE", 96, 30, 80, 26, not autoHealEnabled and C.Red or C.AccentDim)
+-- Scanner
+local hScanSec=healSection("🔍 HEAL SCANNER",118)
+UI.healScanRemBtn = mkBtn(hScanSec,"🔍 SCAN REMOTES",  8,30,140,24,C.Teal); UI.healScanRemBtn.TextColor3=C.BG
+UI.healScanBtnBtn = mkBtn(hScanSec,"🔍 SCAN BUTTONS",156,30,140,24,C.Cyan); UI.healScanBtnBtn.TextColor3=C.BG
+UI.healScanStatus = lbl(hScanSec,{Size=UDim2.new(1,-16,0,18),Position=UDim2.new(0,8,0,60),
+    Text="▸ Press Scan while near a heal center",Font=Enum.Font.Gotham,TextSize=10,TextColor3=C.Dim,
+    TextXAlignment=Enum.TextXAlignment.Left})
+UI.healRemoteScroll=scroll(hScanSec,{Size=UDim2.new(1,-16,0,38),Position=UDim2.new(0,8,0,78),
+    BackgroundColor3=C.PanelAlt,ScrollBarThickness=3,ScrollBarImageColor3=C.Teal,
+    AutomaticCanvasSize=Enum.AutomaticSize.Y,CanvasSize=UDim2.new(0,0,0,0)})
+corner(UI.healRemoteScroll,5); listLayout(UI.healRemoteScroll,{Padding=UDim.new(0,2)})
 
-local healThreshLbl = Instance.new("TextLabel", healToggleSec)
-healThreshLbl.Size = UDim2.new(0, 100, 0, 22)
-healThreshLbl.Position = UDim2.new(0, 8, 0, 60)
-healThreshLbl.BackgroundTransparency = 1
-healThreshLbl.Text = "Heal when HP <"
-healThreshLbl.Font = Enum.Font.Gotham
-healThreshLbl.TextSize = 11
-healThreshLbl.TextColor3 = C.TextDim
-healThreshLbl.TextXAlignment = Enum.TextXAlignment.Left
+-- Selected
+local hSelSec=healSection("✅ SELECTED HEAL SOURCE",98)
+UI.healSelName=lbl(hSelSec,{Size=UDim2.new(1,-16,0,20),Position=UDim2.new(0,8,0,30),
+    Text=Heal.remoteName~="" and "Remote: "..Heal.remoteName or "None selected",
+    Font=Enum.Font.GothamBold,TextSize=12,
+    TextColor3=Heal.remoteName~="" and C.Teal or C.Dim,TextXAlignment=Enum.TextXAlignment.Left})
+UI.healSelPath=lbl(hSelSec,{Size=UDim2.new(1,-16,0,16),Position=UDim2.new(0,8,0,52),
+    Text=Heal.remotePath~="" and Heal.remotePath or "Path: —",Font=Enum.Font.Code,TextSize=9,
+    TextColor3=C.Dim,TextXAlignment=Enum.TextXAlignment.Left,TextTruncate=Enum.TextTruncate.AtEnd})
+UI.healTestBtn =mkBtn(hSelSec,"🧪 TEST HEAL NOW",8,72,140,22,C.Teal); UI.healTestBtn.TextColor3=C.BG
+UI.healClearBtn=mkBtn(hSelSec,"❌ CLEAR",0,72,70,22,C.Red); UI.healClearBtn.Position=UDim2.new(1,-78,0,72)
 
-local healThreshInput = Instance.new("TextBox", healToggleSec)
-healThreshInput.Size = UDim2.fromOffset(50, 22)
-healThreshInput.Position = UDim2.new(0, 112, 0, 60)
-healThreshInput.BackgroundColor3 = C.PanelAlt
-healThreshInput.BorderSizePixel = 0
-healThreshInput.Text = tostring(autoHealThreshold)
-healThreshInput.Font = Enum.Font.GothamBold
-healThreshInput.TextSize = 12
-healThreshInput.TextColor3 = C.Teal
-healThreshInput.ClearTextOnFocus = false
-healThreshInput.TextXAlignment = Enum.TextXAlignment.Center
-Instance.new("UICorner", healThreshInput).CornerRadius = UDim.new(0, 5)
-
-local healThreshPctLbl = Instance.new("TextLabel", healToggleSec)
-healThreshPctLbl.Size = UDim2.fromOffset(20, 22)
-healThreshPctLbl.Position = UDim2.new(0, 166, 0, 60)
-healThreshPctLbl.BackgroundTransparency = 1
-healThreshPctLbl.Text = "%"
-healThreshPctLbl.Font = Enum.Font.GothamBold
-healThreshPctLbl.TextSize = 12
-healThreshPctLbl.TextColor3 = C.Teal
-
--- Section: Heal Remote Scanner
-local healScanSec = Instance.new("Frame", healFrame)
-healScanSec.Size = UDim2.new(1, -8, 0, 120)
-healScanSec.BackgroundColor3 = C.Panel
-healScanSec.BorderSizePixel = 0
-Instance.new("UICorner", healScanSec).CornerRadius = UDim.new(0, 8)
-
-local healScanTitle = Instance.new("TextLabel", healScanSec)
-healScanTitle.Size = UDim2.new(1, -16, 0, 24)
-healScanTitle.Position = UDim2.new(0, 8, 0, 4)
-healScanTitle.BackgroundTransparency = 1
-healScanTitle.Text = "🔍 HEAL REMOTE SCANNER"
-healScanTitle.Font = Enum.Font.GothamBold
-healScanTitle.TextSize = 12
-healScanTitle.TextColor3 = C.Teal
-healScanTitle.TextXAlignment = Enum.TextXAlignment.Left
-
-local healScanBtn = mkSmallBtn(healScanSec, "🔍 SCAN REMOTES", 8, 30, 140, 26, C.Teal)
-healScanBtn.TextColor3 = C.BG
-local healScanBtnBtn = mkSmallBtn(healScanSec, "🔍 SCAN BUTTONS", 156, 30, 140, 26, C.Cyan)
-healScanBtnBtn.TextColor3 = C.BG
-
-local healScanStatusLbl = Instance.new("TextLabel", healScanSec)
-healScanStatusLbl.Size = UDim2.new(1, -16, 0, 18)
-healScanStatusLbl.Position = UDim2.new(0, 8, 0, 62)
-healScanStatusLbl.BackgroundTransparency = 1
-healScanStatusLbl.Text = "▸ Press Scan to find heal remotes"
-healScanStatusLbl.Font = Enum.Font.Gotham
-healScanStatusLbl.TextSize = 10
-healScanStatusLbl.TextColor3 = C.TextDim
-healScanStatusLbl.TextXAlignment = Enum.TextXAlignment.Left
-
--- Heal remote list (scrollable)
-local healRemoteScroll = Instance.new("ScrollingFrame", healScanSec)
-healRemoteScroll.Size = UDim2.new(1, -16, 0, 40)
-healRemoteScroll.Position = UDim2.new(0, 8, 0, 78)
-healRemoteScroll.BackgroundColor3 = C.PanelAlt
-healRemoteScroll.BorderSizePixel = 0
-healRemoteScroll.ScrollBarThickness = 3
-healRemoteScroll.ScrollBarImageColor3 = C.Teal
-healRemoteScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-healRemoteScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-Instance.new("UICorner", healRemoteScroll).CornerRadius = UDim.new(0, 5)
-local healRemoteLayout = Instance.new("UIListLayout", healRemoteScroll)
-healRemoteLayout.SortOrder = Enum.SortOrder.LayoutOrder
-healRemoteLayout.Padding = UDim.new(0, 2)
-
--- Section: Selected Heal Remote Display
-local healSelectedSec = Instance.new("Frame", healFrame)
-healSelectedSec.Size = UDim2.new(1, -8, 0, 100)
-healSelectedSec.BackgroundColor3 = C.Panel
-healSelectedSec.BorderSizePixel = 0
-Instance.new("UICorner", healSelectedSec).CornerRadius = UDim.new(0, 8)
-
-local healSelectedTitle = Instance.new("TextLabel", healSelectedSec)
-healSelectedTitle.Size = UDim2.new(1, -16, 0, 24)
-healSelectedTitle.Position = UDim2.new(0, 8, 0, 4)
-healSelectedTitle.BackgroundTransparency = 1
-healSelectedTitle.Text = "✅ SELECTED HEAL SOURCE"
-healSelectedTitle.Font = Enum.Font.GothamBold
-healSelectedTitle.TextSize = 12
-healSelectedTitle.TextColor3 = C.Teal
-healSelectedTitle.TextXAlignment = Enum.TextXAlignment.Left
-
-local healSelectedName = Instance.new("TextLabel", healSelectedSec)
-healSelectedName.Size = UDim2.new(1, -16, 0, 18)
-healSelectedName.Position = UDim2.new(0, 8, 0, 30)
-healSelectedName.BackgroundTransparency = 1
-healSelectedName.Text = healRemoteName ~= "" and ("Remote: " .. healRemoteName) or "None selected"
-healSelectedName.Font = Enum.Font.GothamBold
-healSelectedName.TextSize = 12
-healSelectedName.TextColor3 = healRemoteName ~= "" and C.Teal or C.TextDim
-healSelectedName.TextXAlignment = Enum.TextXAlignment.Left
-
-local healSelectedPath = Instance.new("TextLabel", healSelectedSec)
-healSelectedPath.Size = UDim2.new(1, -16, 0, 16)
-healSelectedPath.Position = UDim2.new(0, 8, 0, 50)
-healSelectedPath.BackgroundTransparency = 1
-healSelectedPath.Text = healRemotePath ~= "" and healRemotePath or "Path: —"
-healSelectedPath.Font = Enum.Font.Code
-healSelectedPath.TextSize = 9
-healSelectedPath.TextColor3 = C.TextDim
-healSelectedPath.TextXAlignment = Enum.TextXAlignment.Left
-healSelectedPath.TextTruncate = Enum.TextTruncate.AtEnd
-
-local healTestBtn = mkSmallBtn(healSelectedSec, "🧪 TEST HEAL NOW", 8, 70, 140, 22, C.Teal)
-healTestBtn.TextColor3 = C.BG
-local healClearBtn = mkSmallBtn(healSelectedSec, "❌ CLEAR", 0, 70, 70, 22, C.Red)
-healClearBtn.Position = UDim2.new(1, -78, 0, 70)
-
--- Section: Auto-Heal Log
-local healLogSec = Instance.new("Frame", healFrame)
-healLogSec.Size = UDim2.new(1, -8, 0, 100)
-healLogSec.BackgroundColor3 = C.Panel
-healLogSec.BorderSizePixel = 0
-Instance.new("UICorner", healLogSec).CornerRadius = UDim.new(0, 8)
-
-local healLogTitle = Instance.new("TextLabel", healLogSec)
-healLogTitle.Size = UDim2.new(1, -16, 0, 24)
-healLogTitle.Position = UDim2.new(0, 8, 0, 4)
-healLogTitle.BackgroundTransparency = 1
-healLogTitle.Text = "📋 HEAL LOG"
-healLogTitle.Font = Enum.Font.GothamBold
-healLogTitle.TextSize = 12
-healLogTitle.TextColor3 = C.Teal
-healLogTitle.TextXAlignment = Enum.TextXAlignment.Left
-
-local healLogScroll = Instance.new("ScrollingFrame", healLogSec)
-healLogScroll.Size = UDim2.new(1, -16, 1, -32)
-healLogScroll.Position = UDim2.new(0, 8, 0, 28)
-healLogScroll.BackgroundTransparency = 1
-healLogScroll.ScrollBarThickness = 3
-healLogScroll.ScrollBarImageColor3 = C.Teal
-healLogScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-healLogScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-local healLogLayout = Instance.new("UIListLayout", healLogScroll)
-healLogLayout.SortOrder = Enum.SortOrder.LayoutOrder
-healLogLayout.Padding = UDim.new(0, 2)
-
-local healLogOrder = 0
-local function addHealLog(text, color)
-    healLogOrder = healLogOrder + 1
-    local item = Instance.new("TextLabel")
-    item.Size = UDim2.new(1, 0, 0, 16)
-    item.BackgroundTransparency = 1
-    item.Text = "[" .. os.date("%X") .. "] " .. text
-    item.Font = Enum.Font.Code
-    item.TextSize = 10
-    item.TextColor3 = color or C.Teal
-    item.TextXAlignment = Enum.TextXAlignment.Left
-    item.TextTruncate = Enum.TextTruncate.AtEnd
-    item.LayoutOrder = healLogOrder
-    item.Parent = healLogScroll
+-- Heal log
+local hLogSec=healSection("📋 HEAL LOG",100)
+UI.healLogScroll=scroll(hLogSec,{Size=UDim2.new(1,-16,1,-30),Position=UDim2.new(0,8,0,28),
+    BackgroundTransparency=1,ScrollBarThickness=3,ScrollBarImageColor3=C.Teal})
+listLayout(UI.healLogScroll,{Padding=UDim.new(0,2)})
+local healLogOrd=0
+local function addHealLog(text,color)
+    healLogOrd=healLogOrd+1
+    local it=lbl(UI.healLogScroll,{Size=UDim2.new(1,0,0,16),
+        Text="["..os.date("%X").."] "..text,Font=Enum.Font.Code,TextSize=10,
+        TextColor3=color or C.Teal,TextXAlignment=Enum.TextXAlignment.Left,
+        TextTruncate=Enum.TextTruncate.AtEnd})
+    it.LayoutOrder=healLogOrd
 end
 
 --==================================================
 -- HUNT FRAME
 --==================================================
-local contentFrame = Instance.new("Frame", contentContainer)
-contentFrame.Name = "HuntFrame"
-contentFrame.Size = UDim2.new(1, 0, 1, 0)
-contentFrame.BackgroundTransparency = 1
-contentFrame.Visible = true
+local huntFrame=frame(contentWrap,{Size=UDim2.fromScale(1,1),BackgroundTransparency=1,Visible=true})
 
--- TAB SWITCH LOGIC
+-- Tab switcher
 local function switchTab(active)
-    local tabs = {hunt=contentFrame, mastery=masteryFrame, heal=healFrame, cfg=cfgFrame}
-    local btns = {hunt=huntTabBtn, mastery=masteryTabBtn, heal=healTabBtn, cfg=cfgTabBtn}
-    for name, frame in pairs(tabs) do
-        frame.Visible = (name == active)
-        TweenService:Create(btns[name], TweenInfo.new(0.2), {
-            BackgroundColor3 = (name == active) and C.Accent or C.PanelAlt,
-            TextColor3 = (name == active) and C.Text or C.TextDim,
-        }):Play()
+    local map={hunt=huntFrame,mastery=mastFrame,heal=healFrame2,cfg=cfgFrame2}
+    local bmap={hunt=Tabs.huntBtn,mastery=Tabs.mastBtn,heal=Tabs.healBtn,cfg=Tabs.cfgBtn}
+    for name,fr in pairs(map) do
+        fr.Visible=(name==active)
+        Svc.Tween:Create(bmap[name],TweenInfo.new(0.2),{
+            BackgroundColor3=(name==active) and C.Accent or C.PanelAlt,
+            TextColor3=(name==active) and C.Text or C.Dim}):Play()
     end
 end
-
-huntTabBtn.MouseButton1Click:Connect(function() switchTab("hunt") end)
-masteryTabBtn.MouseButton1Click:Connect(function() switchTab("mastery") end)
-healTabBtn.MouseButton1Click:Connect(function() switchTab("heal") end)
-cfgTabBtn.MouseButton1Click:Connect(function() switchTab("cfg") end)
+Tabs.huntBtn.MouseButton1Click:Connect(function() switchTab("hunt") end)
+Tabs.mastBtn.MouseButton1Click:Connect(function() switchTab("mastery") end)
+Tabs.healBtn.MouseButton1Click:Connect(function() switchTab("heal") end)
+Tabs.cfgBtn.MouseButton1Click:Connect(function()  switchTab("cfg") end)
 switchTab("hunt")
 
 -- STATS BAR
-local statsBar = Instance.new("Frame", contentFrame)
-statsBar.Size = UDim2.new(1, 0, 0, 50)
-statsBar.BackgroundColor3 = C.Panel
-statsBar.BorderSizePixel = 0
-Instance.new("UICorner", statsBar).CornerRadius = UDim.new(0, 8)
-local statsLayout = Instance.new("UIListLayout", statsBar)
-statsLayout.FillDirection = Enum.FillDirection.Horizontal
-statsLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
-statsLayout.VerticalAlignment = Enum.VerticalAlignment.Center
-statsLayout.Padding = UDim.new(0, 4)
-
-local function makeStatCell(parent, label, value, color)
-    local cell = Instance.new("Frame", parent)
-    cell.Size = UDim2.new(0.2, -4, 1, -8)
-    cell.BackgroundColor3 = C.PanelAlt
-    cell.BorderSizePixel = 0
-    Instance.new("UICorner", cell).CornerRadius = UDim.new(0, 6)
-    local lbl = Instance.new("TextLabel", cell)
-    lbl.Size = UDim2.new(1, 0, 0.45, 0)
-    lbl.Position = UDim2.new(0, 0, 0, 2)
-    lbl.BackgroundTransparency = 1
-    lbl.Text = label
-    lbl.Font = Enum.Font.Gotham
-    lbl.TextSize = 9
-    lbl.TextColor3 = C.TextDim
-    local val = Instance.new("TextLabel", cell)
-    val.Name = "Value"
-    val.Size = UDim2.new(1, 0, 0.55, 0)
-    val.Position = UDim2.new(0, 0, 0.4, 0)
-    val.BackgroundTransparency = 1
-    val.Text = value
-    val.Font = Enum.Font.GothamBold
-    val.TextSize = 13
-    val.TextColor3 = color or C.Text
-    return val
+do
+    local sb=frame(huntFrame,{Size=UDim2.new(1,0,0,50),BackgroundColor3=C.Panel}); corner(sb,8)
+    local sl2=Instance.new("UIListLayout",sb)
+    sl2.FillDirection=Enum.FillDirection.Horizontal
+    sl2.HorizontalAlignment=Enum.HorizontalAlignment.Center
+    sl2.VerticalAlignment=Enum.VerticalAlignment.Center
+    sl2.Padding=UDim.new(0,4)
+    local function statCell(lbText,valText,col)
+        local cell=frame(sb,{Size=UDim2.new(0.2,-4,1,-8),BackgroundColor3=C.PanelAlt}); corner(cell,6)
+        lbl(cell,{Size=UDim2.new(1,0,0.45,0),Position=UDim2.new(0,0,0,2),Text=lbText,
+            Font=Enum.Font.Gotham,TextSize=9,TextColor3=C.Dim})
+        return lbl(cell,{Size=UDim2.new(1,0,0.55,0),Position=UDim2.new(0,0,0.4,0),
+            Name="Value",Text=valText,Font=Enum.Font.GothamBold,TextSize=13,TextColor3=col or C.Text})
+    end
+    UI.encVal   = statCell("ENCOUNTERS","0",C.Green)
+    UI.epmVal   = statCell("ENC/MIN","0.0",C.Text)
+    UI.timerVal = statCell("HUNT TIME","0m 00s",C.Text)
+    UI.typeVal  = statCell("BATTLE","N/A",C.Dim)
+    UI.stateVal = statCell("STATUS","Idle",C.Dim)
 end
-
-local encounterVal = makeStatCell(statsBar, "ENCOUNTERS", "0", C.Green)
-local epmVal = makeStatCell(statsBar, "ENC/MIN", "0.0", C.Text)
-local timerVal = makeStatCell(statsBar, "HUNT TIME", "0m 00s", C.Text)
-local typeVal = makeStatCell(statsBar, "BATTLE", "N/A", C.TextDim)
-local stateVal = makeStatCell(statsBar, "STATUS", "Idle", C.TextDim)
 
 -- ENCOUNTER PANEL
-local encounterPanel = Instance.new("Frame", contentFrame)
-encounterPanel.Size = UDim2.new(1, 0, 0, 90)
-encounterPanel.Position = UDim2.new(0, 0, 0, 56)
-encounterPanel.BackgroundColor3 = C.Panel
-encounterPanel.BorderSizePixel = 0
-Instance.new("UICorner", encounterPanel).CornerRadius = UDim.new(0, 8)
-local encTitle = Instance.new("TextLabel", encounterPanel)
-encTitle.Size = UDim2.new(1, -16, 0, 24)
-encTitle.Position = UDim2.new(0, 8, 0, 4)
-encTitle.BackgroundTransparency = 1
-encTitle.Text = "CURRENT ENCOUNTER"
-encTitle.Font = Enum.Font.GothamBold
-encTitle.TextSize = 11
-encTitle.TextColor3 = C.Accent
-encTitle.TextXAlignment = Enum.TextXAlignment.Left
-
-local enemyLbl = Instance.new("TextLabel", encounterPanel)
-enemyLbl.Size = UDim2.new(1, -16, 0, 22)
-enemyLbl.Position = UDim2.new(0, 8, 0, 28)
-enemyLbl.BackgroundTransparency = 1
-enemyLbl.Text = "Enemy: Waiting for battle..."
-enemyLbl.Font = Enum.Font.GothamMedium
-enemyLbl.TextSize = 15
-enemyLbl.TextColor3 = C.Text
-enemyLbl.TextXAlignment = Enum.TextXAlignment.Left
-enemyLbl.RichText = true
-
-local enemyStatsLbl = Instance.new("TextLabel", encounterPanel)
-enemyStatsLbl.Size = UDim2.new(1, -16, 0, 18)
-enemyStatsLbl.Position = UDim2.new(0, 8, 0, 48)
-enemyStatsLbl.BackgroundTransparency = 1
-enemyStatsLbl.Text = ""
-enemyStatsLbl.Font = Enum.Font.Gotham
-enemyStatsLbl.TextSize = 12
-enemyStatsLbl.TextColor3 = C.TextDim
-enemyStatsLbl.TextXAlignment = Enum.TextXAlignment.Left
-
-local playerLbl = Instance.new("TextLabel", encounterPanel)
-playerLbl.Size = UDim2.new(1, -16, 0, 18)
-playerLbl.Position = UDim2.new(0, 8, 0, 68)
-playerLbl.BackgroundTransparency = 1
-playerLbl.Text = "Your Loomian: —"
-playerLbl.Font = Enum.Font.Gotham
-playerLbl.TextSize = 12
-playerLbl.TextColor3 = C.TextDim
-playerLbl.TextXAlignment = Enum.TextXAlignment.Left
+do
+    local ep=frame(huntFrame,{Size=UDim2.new(1,0,0,90),Position=UDim2.new(0,0,0,56),BackgroundColor3=C.Panel}); corner(ep,8)
+    lbl(ep,{Size=UDim2.new(1,-16,0,22),Position=UDim2.new(0,8,0,4),Text="CURRENT ENCOUNTER",
+        Font=Enum.Font.GothamBold,TextSize=11,TextColor3=C.Accent,TextXAlignment=Enum.TextXAlignment.Left})
+    UI.enemyLbl=lbl(ep,{Size=UDim2.new(1,-16,0,22),Position=UDim2.new(0,8,0,26),
+        Text="Enemy: Waiting for battle...",Font=Enum.Font.GothamMedium,TextSize=15,
+        TextColor3=C.Text,TextXAlignment=Enum.TextXAlignment.Left,RichText=true})
+    UI.enemyStatsLbl=lbl(ep,{Size=UDim2.new(1,-16,0,18),Position=UDim2.new(0,8,0,48),
+        Font=Enum.Font.Gotham,TextSize=12,TextColor3=C.Dim,TextXAlignment=Enum.TextXAlignment.Left})
+    UI.playerLbl=lbl(ep,{Size=UDim2.new(1,-16,0,18),Position=UDim2.new(0,8,0,68),
+        Text="Your Loomian: —",Font=Enum.Font.Gotham,TextSize=12,TextColor3=C.Dim,TextXAlignment=Enum.TextXAlignment.Left})
+end
 
 -- RARE LOG
-local logPanel = Instance.new("Frame", contentFrame)
-logPanel.Size = UDim2.new(1, 0, 0, 80)
-logPanel.Position = UDim2.new(0, 0, 0, 152)
-logPanel.BackgroundColor3 = C.Panel
-logPanel.BorderSizePixel = 0
-Instance.new("UICorner", logPanel).CornerRadius = UDim.new(0, 8)
-local logTitle = Instance.new("TextLabel", logPanel)
-logTitle.Size = UDim2.new(1, -16, 0, 24)
-logTitle.Position = UDim2.new(0, 8, 0, 4)
-logTitle.BackgroundTransparency = 1
-logTitle.Text = "⭐ RARE FINDER LOG"
-logTitle.Font = Enum.Font.GothamBold
-logTitle.TextSize = 11
-logTitle.TextColor3 = C.Gold
-logTitle.TextXAlignment = Enum.TextXAlignment.Left
-local rareScroll = Instance.new("ScrollingFrame", logPanel)
-rareScroll.Size = UDim2.new(1, -16, 1, -32)
-rareScroll.Position = UDim2.new(0, 8, 0, 28)
-rareScroll.BackgroundTransparency = 1
-rareScroll.ScrollBarThickness = 3
-rareScroll.ScrollBarImageColor3 = C.Accent
-rareScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-rareScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-local logLayout = Instance.new("UIListLayout", rareScroll)
-logLayout.SortOrder = Enum.SortOrder.LayoutOrder
-logLayout.Padding = UDim.new(0, 3)
-
-local logOrder = 0
-local function addRareLog(name, extraInfo)
-    logOrder = logOrder + 1
-    local item = Instance.new("TextLabel")
-    item.Size = UDim2.new(1, 0, 0, 20)
-    item.BackgroundTransparency = 1
-    item.Text = "⭐ [" .. os.date("%X") .. "] " .. name .. (extraInfo and (" — " .. extraInfo) or "")
-    item.Font = Enum.Font.GothamMedium
-    item.TextSize = 12
-    item.TextColor3 = C.Gold
-    item.TextXAlignment = Enum.TextXAlignment.Left
-    item.LayoutOrder = logOrder
-    item.Parent = rareScroll
+do
+    local rp=frame(huntFrame,{Size=UDim2.new(1,0,0,80),Position=UDim2.new(0,0,0,152),BackgroundColor3=C.Panel}); corner(rp,8)
+    lbl(rp,{Size=UDim2.new(1,-16,0,22),Position=UDim2.new(0,8,0,4),Text="⭐ RARE FINDER LOG",
+        Font=Enum.Font.GothamBold,TextSize=11,TextColor3=C.Gold,TextXAlignment=Enum.TextXAlignment.Left})
+    UI.rareScroll=scroll(rp,{Size=UDim2.new(1,-16,1,-30),Position=UDim2.new(0,8,0,28),
+        BackgroundTransparency=1,ScrollBarThickness=3,ScrollBarImageColor3=C.Accent,
+        AutomaticCanvasSize=Enum.AutomaticSize.Y,CanvasSize=UDim2.new(0,0,0,0)})
+    listLayout(UI.rareScroll,{Padding=UDim.new(0,3)})
+end
+local rareLogOrd=0
+local function addRareLog(name,extra)
+    rareLogOrd=rareLogOrd+1
+    local it=lbl(UI.rareScroll,{Size=UDim2.new(1,0,0,20),
+        Text="⭐ ["..os.date("%X").."] "..name..(extra and " — "..extra or ""),
+        Font=Enum.Font.GothamMedium,TextSize=12,TextColor3=C.Gold,TextXAlignment=Enum.TextXAlignment.Left})
+    it.LayoutOrder=rareLogOrd
 end
 
--- WEBHOOK PANEL (compact, in hunt tab)
-local whPanel = Instance.new("Frame", contentFrame)
-whPanel.Size = UDim2.new(1, 0, 0, 56)
-whPanel.Position = UDim2.new(0, 0, 0, 238)
-whPanel.BackgroundColor3 = C.Panel
-whPanel.BorderSizePixel = 0
-Instance.new("UICorner", whPanel).CornerRadius = UDim.new(0, 8)
-local wt = Instance.new("TextLabel", whPanel)
-wt.Size = UDim2.new(1, -16, 0, 20)
-wt.Position = UDim2.new(0, 8, 0, 4)
-wt.BackgroundTransparency = 1
-wt.Text = "📡 WEBHOOK"
-wt.Font = Enum.Font.GothamBold
-wt.TextSize = 11
-wt.TextColor3 = C.Cyan
-wt.TextXAlignment = Enum.TextXAlignment.Left
-local whInput = Instance.new("TextBox", whPanel)
-whInput.Size = UDim2.new(1, -60, 0, 26)
-whInput.Position = UDim2.new(0, 8, 0, 26)
-whInput.BackgroundColor3 = C.PanelAlt
-whInput.BorderSizePixel = 0
-whInput.PlaceholderText = "Paste webhook URL..."
-whInput.PlaceholderColor3 = Color3.fromRGB(100, 100, 110)
-whInput.Text = config.webhookUrl or ""
-whInput.Font = Enum.Font.Gotham
-whInput.TextSize = 11
-whInput.TextColor3 = C.Text
-whInput.ClearTextOnFocus = false
-whInput.TextXAlignment = Enum.TextXAlignment.Left
-Instance.new("UICorner", whInput).CornerRadius = UDim.new(0, 5)
-Instance.new("UIPadding", whInput).PaddingLeft = UDim.new(0, 6)
-local whSave = Instance.new("TextButton", whPanel)
-whSave.Size = UDim2.fromOffset(42, 26)
-whSave.Position = UDim2.new(1, -50, 0, 26)
-whSave.BackgroundColor3 = C.Cyan
-whSave.Text = "SET"
-whSave.Font = Enum.Font.GothamBold
-whSave.TextSize = 11
-whSave.TextColor3 = C.BG
-whSave.BorderSizePixel = 0
-Instance.new("UICorner", whSave).CornerRadius = UDim.new(0, 5)
-whSave.MouseButton1Click:Connect(function()
-    webhookUrl = whInput.Text
-    config.webhookUrl = webhookUrl
-    if webhookUrl ~= "" then
-        sendNotification("LumiWare", "Webhook saved!", 3)
-        sendWebhook({title="✅ Webhook Connected!", color=5763719, fields={{name="Player",value=PLAYER_NAME,inline=true}}, footer={text="LumiWare " .. VERSION}})
-    else
-        sendNotification("LumiWare", "Webhook cleared.", 3)
+-- WEBHOOK (compact in hunt tab)
+do
+    local wp=frame(huntFrame,{Size=UDim2.new(1,0,0,54),Position=UDim2.new(0,0,0,238),BackgroundColor3=C.Panel}); corner(wp,8)
+    lbl(wp,{Size=UDim2.new(1,-16,0,20),Position=UDim2.new(0,8,0,4),Text="📡 WEBHOOK",
+        Font=Enum.Font.GothamBold,TextSize=11,TextColor3=C.Cyan,TextXAlignment=Enum.TextXAlignment.Left})
+    UI.whInput=box(wp,{Size=UDim2.new(1,-58,0,24),Position=UDim2.new(0,8,0,26),
+        BackgroundColor3=C.PanelAlt,PlaceholderText="Paste webhook URL...",
+        PlaceholderColor3=C.Dim,Text=cfg.webhookUrl or "",Font=Enum.Font.Gotham,
+        TextSize=11,TextColor3=C.Text,TextXAlignment=Enum.TextXAlignment.Left})
+    corner(UI.whInput,5); Instance.new("UIPadding",UI.whInput).PaddingLeft=UDim.new(0,6)
+    local whSaveBtn=btn(wp,{Size=UDim2.fromOffset(42,24),Position=UDim2.new(1,-50,0,26),
+        BackgroundColor3=C.Cyan,Text="SET",Font=Enum.Font.GothamBold,TextSize=11,TextColor3=C.BG}); corner(whSaveBtn,5)
+    whSaveBtn.MouseButton1Click:Connect(function()
+        Webhook.url=UI.whInput.Text; cfg.webhookUrl=Webhook.url
+        if Webhook.url~="" then
+            notify("LumiWare","Webhook saved!",3)
+            sendWebhook({title="✅ Webhook Connected!",color=5763719,
+                fields={{name="Player",value=PLAYER_NAME,inline=true}},footer={text="LumiWare "..VERSION}})
+        else notify("LumiWare","Webhook cleared.",3) end
+    end)
+end
+
+-- AUTOMATION PANEL
+local wildSlotBtns={}
+local trSlotBtns={}
+local walkBtn2, autoStatusLbl2, scanBtn2
+
+do
+    local ap=frame(huntFrame,{Size=UDim2.new(1,0,0,178),Position=UDim2.new(0,0,0,298),BackgroundColor3=C.Panel}); corner(ap,8)
+    lbl(ap,{Size=UDim2.new(1,-16,0,20),Position=UDim2.new(0,8,0,4),Text="🤖 AUTOMATION",
+        Font=Enum.Font.GothamBold,TextSize=11,TextColor3=C.Pink,TextXAlignment=Enum.TextXAlignment.Left})
+
+    -- Wild
+    lbl(ap,{Size=UDim2.new(0,60,0,16),Position=UDim2.new(0,8,0,26),Text="🌿 WILD:",
+        Font=Enum.Font.GothamBold,TextSize=10,TextColor3=C.Wild,TextXAlignment=Enum.TextXAlignment.Left})
+    UI.wOff =mkBtn(ap,"OFF",  8, 44,44,22,C.Red);   hover(UI.wOff, C.AccentDim,C.Red)
+    UI.wMove=mkBtn(ap,"MOVE",58, 44,52,22,C.AccentDim); hover(UI.wMove,C.AccentDim,C.Green)
+    UI.wRun =mkBtn(ap,"RUN", 116,44,44,22,C.AccentDim); hover(UI.wRun, C.AccentDim,C.Cyan)
+    lbl(ap,{Size=UDim2.fromOffset(30,22),Position=UDim2.new(0,165,0,44),Text="Slot:",
+        Font=Enum.Font.GothamBold,TextSize=10,TextColor3=C.Dim})
+    for s=1,4 do
+        wildSlotBtns[s]=mkBtn(ap,tostring(s),197+(s-1)*26,44,22,22,C.AccentDim); hover(wildSlotBtns[s],C.PanelAlt,C.AccentDim)
     end
-end)
 
---==================================================
--- AUTOMATION PANEL (Wild + NEW Trainer)
---==================================================
-local autoPanel = Instance.new("Frame", contentFrame)
-autoPanel.Size = UDim2.new(1, 0, 0, 180)
-autoPanel.Position = UDim2.new(0, 0, 0, 300)
-autoPanel.BackgroundColor3 = C.Panel
-autoPanel.BorderSizePixel = 0
-Instance.new("UICorner", autoPanel).CornerRadius = UDim.new(0, 8)
-
-local autoTitle = Instance.new("TextLabel", autoPanel)
-autoTitle.Size = UDim2.new(1, -16, 0, 20)
-autoTitle.Position = UDim2.new(0, 8, 0, 4)
-autoTitle.BackgroundTransparency = 1
-autoTitle.Text = "🤖 AUTOMATION"
-autoTitle.Font = Enum.Font.GothamBold
-autoTitle.TextSize = 11
-autoTitle.TextColor3 = Color3.fromRGB(255, 120, 255)
-autoTitle.TextXAlignment = Enum.TextXAlignment.Left
-
--- Wild Battle Auto
-local wildSectionLbl = Instance.new("TextLabel", autoPanel)
-wildSectionLbl.Size = UDim2.new(0.4, 0, 0, 16)
-wildSectionLbl.Position = UDim2.new(0, 8, 0, 26)
-wildSectionLbl.BackgroundTransparency = 1
-wildSectionLbl.Text = "🌿 WILD:"
-wildSectionLbl.Font = Enum.Font.GothamBold
-wildSectionLbl.TextSize = 10
-wildSectionLbl.TextColor3 = C.Wild
-wildSectionLbl.TextXAlignment = Enum.TextXAlignment.Left
-
-local function mkAutoBtn(parent, text, xOff, yOff, width)
-    local b = Instance.new("TextButton", parent)
-    b.Size = UDim2.fromOffset(width or 60, 22)
-    b.Position = UDim2.new(0, xOff, 0, yOff)
-    b.BackgroundColor3 = C.AccentDim
-    b.Text = text
-    b.Font = Enum.Font.GothamBold
-    b.TextSize = 10
-    b.TextColor3 = C.Text
-    b.BorderSizePixel = 0
-    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 5)
-    return b
-end
-
-local wildOffBtn  = mkAutoBtn(autoPanel, "OFF",  8,  44, 44)
-local wildMoveBtn = mkAutoBtn(autoPanel, "MOVE", 58, 44, 52)
-local wildRunBtn  = mkAutoBtn(autoPanel, "RUN",  116, 44, 44)
-
-addHoverEffect(wildOffBtn, C.AccentDim, C.Red)
-addHoverEffect(wildMoveBtn, C.AccentDim, C.Green)
-addHoverEffect(wildRunBtn, C.AccentDim, C.Cyan)
-
-local wildSlotLbl = Instance.new("TextLabel", autoPanel)
-wildSlotLbl.Size = UDim2.new(0, 32, 0, 22)
-wildSlotLbl.Position = UDim2.new(0, 166, 0, 44)
-wildSlotLbl.BackgroundTransparency = 1
-wildSlotLbl.Text = "Slot:"
-wildSlotLbl.Font = Enum.Font.GothamBold
-wildSlotLbl.TextSize = 10
-wildSlotLbl.TextColor3 = C.TextDim
-
-local wildSlotBtns = {}
-for s = 1, 4 do
-    local sb = mkAutoBtn(autoPanel, tostring(s), 200 + (s-1)*26, 44, 22)
-    wildSlotBtns[s] = sb
-end
-
--- Trainer Battle Auto (NEW)
-local trainerSectionLbl = Instance.new("TextLabel", autoPanel)
-trainerSectionLbl.Size = UDim2.new(0.4, 0, 0, 16)
-trainerSectionLbl.Position = UDim2.new(0, 8, 0, 74)
-trainerSectionLbl.BackgroundTransparency = 1
-trainerSectionLbl.Text = "🎖️ TRAINER:"
-trainerSectionLbl.Font = Enum.Font.GothamBold
-trainerSectionLbl.TextSize = 10
-trainerSectionLbl.TextColor3 = C.Trainer
-trainerSectionLbl.TextXAlignment = Enum.TextXAlignment.Left
-
-local trOffBtn  = mkAutoBtn(autoPanel, "OFF",  8,  92, 44)
-local trMoveBtn = mkAutoBtn(autoPanel, "MOVE", 58, 92, 52)
-local trRunBtn  = mkAutoBtn(autoPanel, "RUN",  116, 92, 44)
-
-addHoverEffect(trOffBtn, C.AccentDim, C.Red)
-addHoverEffect(trMoveBtn, C.AccentDim, C.Orange)
-addHoverEffect(trRunBtn, C.AccentDim, C.Cyan)
-
-local trSlotLbl = Instance.new("TextLabel", autoPanel)
-trSlotLbl.Size = UDim2.new(0, 32, 0, 22)
-trSlotLbl.Position = UDim2.new(0, 166, 0, 92)
-trSlotLbl.BackgroundTransparency = 1
-trSlotLbl.Text = "Slot:"
-trSlotLbl.Font = Enum.Font.GothamBold
-trSlotLbl.TextSize = 10
-trSlotLbl.TextColor3 = C.TextDim
-
-local trSlotBtns = {}
-for s = 1, 4 do
-    local sb = mkAutoBtn(autoPanel, tostring(s), 200 + (s-1)*26, 92, 22)
-    trSlotBtns[s] = sb
-end
-
--- Auto-walk + Scan row
-local walkBtn = mkAutoBtn(autoPanel, "🚶 AUTO-WALK: OFF", 8, 122, 140)
-local scanBtn = mkAutoBtn(autoPanel, "🔍 SCAN UI", 155, 122, 80)
-scanBtn.BackgroundColor3 = C.PanelAlt
-addHoverEffect(scanBtn, C.PanelAlt, C.Accent)
-
--- Status
-local autoStatusLbl = Instance.new("TextLabel", autoPanel)
-autoStatusLbl.Size = UDim2.new(1, -16, 0, 22)
-autoStatusLbl.Position = UDim2.new(0, 8, 0, 152)
-autoStatusLbl.BackgroundTransparency = 1
-autoStatusLbl.Text = ""
-autoStatusLbl.Font = Enum.Font.Gotham
-autoStatusLbl.TextSize = 10
-autoStatusLbl.TextColor3 = C.TextDim
-autoStatusLbl.TextXAlignment = Enum.TextXAlignment.Left
-
-local function updateAutoUI()
-    wildOffBtn.BackgroundColor3  = autoMode == "off"  and C.Red   or C.AccentDim
-    wildMoveBtn.BackgroundColor3 = autoMode == "move" and C.Green or C.AccentDim
-    wildRunBtn.BackgroundColor3  = autoMode == "run"  and C.Cyan  or C.AccentDim
-    for s = 1, 4 do
-        wildSlotBtns[s].BackgroundColor3 = (autoMoveSlot == s and autoMode == "move") and C.Accent or C.AccentDim
+    -- Trainer
+    lbl(ap,{Size=UDim2.new(0,70,0,16),Position=UDim2.new(0,8,0,72),Text="🎖️ TRAINER:",
+        Font=Enum.Font.GothamBold,TextSize=10,TextColor3=C.Trainer,TextXAlignment=Enum.TextXAlignment.Left})
+    UI.tOff =mkBtn(ap,"OFF",  8, 90,44,22,C.Red);   hover(UI.tOff, C.AccentDim,C.Red)
+    UI.tMove=mkBtn(ap,"MOVE",58, 90,52,22,C.AccentDim); hover(UI.tMove,C.AccentDim,C.Trainer)
+    UI.tRun =mkBtn(ap,"RUN", 116,90,44,22,C.AccentDim); hover(UI.tRun, C.AccentDim,C.Cyan)
+    lbl(ap,{Size=UDim2.fromOffset(30,22),Position=UDim2.new(0,165,0,90),Text="Slot:",
+        Font=Enum.Font.GothamBold,TextSize=10,TextColor3=C.Dim})
+    for s=1,4 do
+        trSlotBtns[s]=mkBtn(ap,tostring(s),197+(s-1)*26,90,22,22,C.AccentDim); hover(trSlotBtns[s],C.PanelAlt,C.AccentDim)
     end
-    trOffBtn.BackgroundColor3  = trainerAutoMode == "off"  and C.Red    or C.AccentDim
-    trMoveBtn.BackgroundColor3 = trainerAutoMode == "move" and C.Orange or C.AccentDim
-    trRunBtn.BackgroundColor3  = trainerAutoMode == "run"  and C.Cyan   or C.AccentDim
-    for s = 1, 4 do
-        trSlotBtns[s].BackgroundColor3 = (trainerAutoMoveSlot == s and trainerAutoMode == "move") and C.Accent or C.AccentDim
-    end
-    walkBtn.BackgroundColor3 = autoWalkEnabled and C.Green or C.PanelAlt
-    walkBtn.Text = autoWalkEnabled and "🚶 WALKING" or "🚶 AUTO-WALK"
 
-    local wild_s = autoMode == "off" and "Wild: OFF" or ("Wild: " .. string.upper(autoMode) .. " /" .. autoMoveSlot)
-    local trainer_s = trainerAutoMode == "off" and "Trainer: OFF" or ("Trainer: " .. string.upper(trainerAutoMode) .. " /" .. trainerAutoMoveSlot)
-    autoStatusLbl.Text = wild_s .. "  |  " .. trainer_s .. (rareFoundPause and "  [⏸ RARE PAUSE]" or "")
+    walkBtn2 = mkBtn(ap,"🚶 AUTO-WALK",8,118,138,22,C.PanelAlt); hover(walkBtn2,C.AccentDim,C.Accent)
+    scanBtn2 = mkBtn(ap,"🔍 SCAN UI",153,118,80,22,C.PanelAlt); hover(scanBtn2,C.PanelAlt,C.Accent)
 
-    -- Update config UI
-    cfgAutoModeVal.Text = autoMode
-    cfgAutoModeVal.TextColor3 = autoMode == "off" and C.Red or C.Green
-    cfgTrainerModeVal.Text = trainerAutoMode
-    cfgTrainerModeVal.TextColor3 = trainerAutoMode == "off" and C.Red or C.Orange
-    cfgWildSlotVal.Text = tostring(autoMoveSlot)
-    cfgTrainerSlotVal.Text = tostring(trainerAutoMoveSlot)
+    autoStatusLbl2=lbl(ap,{Size=UDim2.new(1,-16,0,22),Position=UDim2.new(0,8,0,144),
+        Font=Enum.Font.Gotham,TextSize=10,TextColor3=C.Dim,TextXAlignment=Enum.TextXAlignment.Left})
 end
-
--- Wild buttons
-track(wildOffBtn.MouseButton1Click:Connect(function()
-    autoMode = "off"; config.autoMode = autoMode; saveConfig(); rareFoundPause = false; updateAutoUI()
-end))
-track(wildMoveBtn.MouseButton1Click:Connect(function()
-    autoMode = "move"; config.autoMode = autoMode; saveConfig(); rareFoundPause = false; updateAutoUI()
-    sendNotification("LumiWare", "Wild Auto-MOVE slot " .. autoMoveSlot, 3)
-end))
-track(wildRunBtn.MouseButton1Click:Connect(function()
-    autoMode = "run"; config.autoMode = autoMode; saveConfig(); rareFoundPause = false; updateAutoUI()
-    sendNotification("LumiWare", "Wild Auto-RUN enabled", 3)
-end))
-for s = 1, 4 do
-    track(wildSlotBtns[s].MouseButton1Click:Connect(function()
-        autoMoveSlot = s; config.autoMoveSlot = s; saveConfig(); updateAutoUI()
-    end))
-    addHoverEffect(wildSlotBtns[s], C.PanelAlt, C.AccentDim)
-end
-
--- Trainer buttons
-track(trOffBtn.MouseButton1Click:Connect(function()
-    trainerAutoMode = "off"; config.trainerAutoMode = trainerAutoMode; saveConfig(); updateAutoUI()
-end))
-track(trMoveBtn.MouseButton1Click:Connect(function()
-    trainerAutoMode = "move"; config.trainerAutoMode = trainerAutoMode; saveConfig(); updateAutoUI()
-    sendNotification("LumiWare", "Trainer Auto-MOVE slot " .. trainerAutoMoveSlot, 3)
-end))
-track(trRunBtn.MouseButton1Click:Connect(function()
-    trainerAutoMode = "run"; config.trainerAutoMode = trainerAutoMode; saveConfig(); updateAutoUI()
-    sendNotification("LumiWare", "Trainer Auto-RUN enabled", 3)
-end))
-for s = 1, 4 do
-    track(trSlotBtns[s].MouseButton1Click:Connect(function()
-        trainerAutoMoveSlot = s; config.trainerAutoMoveSlot = s; saveConfig(); updateAutoUI()
-    end))
-    addHoverEffect(trSlotBtns[s], C.PanelAlt, C.AccentDim)
-end
-
-updateAutoUI()
 
 -- BATTLE LOG
-local blPanel = Instance.new("Frame", contentFrame)
-blPanel.Size = UDim2.new(1, 0, 0, 100)
-blPanel.Position = UDim2.new(0, 0, 0, 486)
-blPanel.BackgroundColor3 = C.Panel
-blPanel.BorderSizePixel = 0
-Instance.new("UICorner", blPanel).CornerRadius = UDim.new(0, 8)
-local blt = Instance.new("TextLabel", blPanel)
-blt.Size = UDim2.new(1, -16, 0, 20)
-blt.Position = UDim2.new(0, 8, 0, 4)
-blt.BackgroundTransparency = 1
-blt.Text = "⚔️ BATTLE LOG"
-blt.Font = Enum.Font.GothamBold
-blt.TextSize = 11
-blt.TextColor3 = C.Green
-blt.TextXAlignment = Enum.TextXAlignment.Left
-local battleScroll = Instance.new("ScrollingFrame", blPanel)
-battleScroll.Size = UDim2.new(1, -16, 1, -28)
-battleScroll.Position = UDim2.new(0, 8, 0, 24)
-battleScroll.BackgroundTransparency = 1
-battleScroll.ScrollBarThickness = 3
-battleScroll.ScrollBarImageColor3 = C.Green
-battleScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-battleScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-local bll = Instance.new("UIListLayout", battleScroll)
-bll.SortOrder = Enum.SortOrder.LayoutOrder
-bll.Padding = UDim.new(0, 2)
-
-local blOrder, blCount = 0, 0
-addBattleLog = function(text, color)
-    blOrder = blOrder + 1
-    blCount = blCount + 1
-    local item = Instance.new("TextLabel")
-    item.Size = UDim2.new(1, 0, 0, 16)
-    item.BackgroundTransparency = 1
-    item.Text = "[" .. os.date("%X") .. "] " .. text
-    item.Font = Enum.Font.Code
-    item.TextSize = 10
-    item.TextColor3 = color or C.TextDim
-    item.TextXAlignment = Enum.TextXAlignment.Left
-    item.TextTruncate = Enum.TextTruncate.AtEnd
-    item.LayoutOrder = blOrder
-    item.Parent = battleScroll
-    if blCount > 40 then
-        for _, ch in ipairs(battleScroll:GetChildren()) do
-            if ch:IsA("TextLabel") then ch:Destroy(); blCount = blCount - 1; break end
+local addBattleLog
+do
+    local bp=frame(huntFrame,{Size=UDim2.new(1,0,0,100),Position=UDim2.new(0,0,0,482),BackgroundColor3=C.Panel}); corner(bp,8)
+    lbl(bp,{Size=UDim2.new(1,-16,0,20),Position=UDim2.new(0,8,0,4),Text="⚔️ BATTLE LOG",
+        Font=Enum.Font.GothamBold,TextSize=11,TextColor3=C.Green,TextXAlignment=Enum.TextXAlignment.Left})
+    local bscroll=scroll(bp,{Size=UDim2.new(1,-16,1,-28),Position=UDim2.new(0,8,0,24),
+        BackgroundTransparency=1,ScrollBarThickness=3,ScrollBarImageColor3=C.Green,
+        AutomaticCanvasSize=Enum.AutomaticSize.Y,CanvasSize=UDim2.new(0,0,0,0)})
+    listLayout(bscroll,{Padding=UDim.new(0,2)})
+    local bOrd,bCnt=0,0
+    addBattleLog=function(text,color)
+        bOrd=bOrd+1; bCnt=bCnt+1
+        local it=lbl(bscroll,{Size=UDim2.new(1,0,0,16),
+            Text="["..os.date("%X").."] "..text,Font=Enum.Font.Code,TextSize=10,
+            TextColor3=color or C.Dim,TextXAlignment=Enum.TextXAlignment.Left,
+            TextTruncate=Enum.TextTruncate.AtEnd})
+        it.LayoutOrder=bOrd
+        if bCnt>40 then
+            for _,ch in ipairs(bscroll:GetChildren()) do
+                if ch:IsA("TextLabel") then ch:Destroy(); bCnt=bCnt-1; break end
+            end
         end
     end
 end
 
 -- CONTROLS
-local ctrlPanel = Instance.new("Frame", contentFrame)
-ctrlPanel.Size = UDim2.new(1, 0, 0, 36)
-ctrlPanel.Position = UDim2.new(0, 0, 0, 592)
-ctrlPanel.BackgroundColor3 = C.Panel
-ctrlPanel.BorderSizePixel = 0
-Instance.new("UICorner", ctrlPanel).CornerRadius = UDim.new(0, 8)
-local cl = Instance.new("UIListLayout", ctrlPanel)
-cl.FillDirection = Enum.FillDirection.Horizontal
-cl.HorizontalAlignment = Enum.HorizontalAlignment.Center
-cl.VerticalAlignment = Enum.VerticalAlignment.Center
-cl.Padding = UDim.new(0, 6)
-
-local function mkCtrlBtn(parent, text)
-    local b = Instance.new("TextButton", parent)
-    b.Size = UDim2.new(0.33, -6, 0, 26)
-    b.BackgroundColor3 = C.AccentDim
-    b.Text = text
-    b.Font = Enum.Font.GothamBold
-    b.TextSize = 10
-    b.TextColor3 = C.Text
-    b.BorderSizePixel = 0
-    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 5)
-    return b
+do
+    local cp=frame(huntFrame,{Size=UDim2.new(1,0,0,34),Position=UDim2.new(0,0,0,588),BackgroundColor3=C.Panel}); corner(cp,8)
+    local cl2=Instance.new("UIListLayout",cp)
+    cl2.FillDirection=Enum.FillDirection.Horizontal
+    cl2.HorizontalAlignment=Enum.HorizontalAlignment.Center
+    cl2.VerticalAlignment=Enum.VerticalAlignment.Center
+    cl2.Padding=UDim.new(0,6)
+    local function ctrlBtn(text)
+        local b=btn(cp,{Size=UDim2.new(0.33,-6,0,24),BackgroundColor3=C.AccentDim,
+            Text=text,Font=Enum.Font.GothamBold,TextSize=10,TextColor3=C.Text}); corner(b,5); return b
+    end
+    local resetBtn=ctrlBtn("🔄 RESET")
+    local discBtn =ctrlBtn("🔍 DISCOVERY")
+    local verbBtn =ctrlBtn("📝 VERBOSE")
+    track(resetBtn.MouseButton1Click:Connect(function()
+        State.encounterCount=0; State.huntStart=tick(); State.raresFound=0
+        State.encounterHistory={}; State.currentEnemy=nil; resetBattle()
+        UI.encVal.Text="0"; UI.epmVal.Text="0.0"; UI.timerVal.Text="0m 00s"
+        UI.typeVal.Text="N/A"; UI.typeVal.TextColor3=C.Dim
+        UI.stateVal.Text="Idle"; UI.stateVal.TextColor3=C.Dim
+        UI.enemyLbl.Text="Enemy: Waiting for battle..."
+        UI.enemyStatsLbl.Text=""; UI.playerLbl.Text="Your Loomian: —"
+        addBattleLog("Session reset",C.Accent)
+    end))
+    track(discBtn.MouseButton1Click:Connect(function()
+        State.discoveryMode=not State.discoveryMode
+        discBtn.BackgroundColor3=State.discoveryMode and C.Trainer or C.AccentDim
+        discBtn.Text=State.discoveryMode and "🔍 DISC:ON" or "🔍 DISCOVERY"
+    end))
+    track(verbBtn.MouseButton1Click:Connect(function()
+        VERBOSE=not VERBOSE
+        verbBtn.BackgroundColor3=VERBOSE and C.Trainer or C.AccentDim
+        verbBtn.Text=VERBOSE and "📝 VERB:ON" or "📝 VERBOSE"
+    end))
 end
-local resetBtn    = mkCtrlBtn(ctrlPanel, "🔄 RESET")
-local discoveryBtn = mkCtrlBtn(ctrlPanel, "🔍 DISCOVERY")
-local verboseBtn  = mkCtrlBtn(ctrlPanel, "📝 VERBOSE")
-
-track(resetBtn.MouseButton1Click:Connect(function()
-    encounterCount = 0; huntStartTime = tick(); raresFoundCount = 0
-    encounterHistory = {}; currentEnemy = nil; resetBattle()
-    encounterVal.Text = "0"; epmVal.Text = "0.0"; timerVal.Text = "0m 00s"
-    typeVal.Text = "N/A"; typeVal.TextColor3 = C.TextDim
-    stateVal.Text = "Idle"; stateVal.TextColor3 = C.TextDim
-    enemyLbl.Text = "Enemy: Waiting for battle..."
-    enemyStatsLbl.Text = ""; playerLbl.Text = "Your Loomian: —"
-    addBattleLog("Session reset", C.Accent)
-end))
-track(discoveryBtn.MouseButton1Click:Connect(function()
-    discoveryMode = not discoveryMode
-    discoveryBtn.BackgroundColor3 = discoveryMode and C.Orange or C.AccentDim
-    discoveryBtn.Text = discoveryMode and "🔍 DISC: ON" or "🔍 DISCOVERY"
-    addBattleLog("Discovery: " .. tostring(discoveryMode), C.Orange)
-end))
-track(verboseBtn.MouseButton1Click:Connect(function()
-    VERBOSE_MODE = not VERBOSE_MODE
-    verboseBtn.BackgroundColor3 = VERBOSE_MODE and C.Orange or C.AccentDim
-    verboseBtn.Text = VERBOSE_MODE and "📝 VERB: ON" or "📝 VERBOSE"
-end))
 
 -- MINIMIZE
-local fullSize = UDim2.fromOffset(480, 740)
 track(minBtn.MouseButton1Click:Connect(function()
-    isMinimized = not isMinimized
-    if isMinimized then
-        TweenService:Create(mainFrame, TweenInfo.new(0.25, Enum.EasingStyle.Quint), {Size = UDim2.fromOffset(480, 36)}):Play()
-        contentContainer.Visible = false; tabBar.Visible = false; minBtn.Text = "+"
+    State.isMinimized=not State.isMinimized
+    if State.isMinimized then
+        Svc.Tween:Create(mainFrame,TweenInfo.new(0.25,Enum.EasingStyle.Quint),{Size=UDim2.fromOffset(480,36)}):Play()
+        contentWrap.Visible=false; tabBar.Visible=false; minBtn.Text="+"
     else
-        contentContainer.Visible = true; tabBar.Visible = true
-        TweenService:Create(mainFrame, TweenInfo.new(0.25, Enum.EasingStyle.Quint), {Size = fullSize}):Play()
-        minBtn.Text = "–"
+        contentWrap.Visible=true; tabBar.Visible=true
+        Svc.Tween:Create(mainFrame,TweenInfo.new(0.25,Enum.EasingStyle.Quint),{Size=UDim2.fromOffset(480,740)}):Play()
+        minBtn.Text="–"
     end
 end))
 
 --==================================================
--- CONFIG TAB LOGIC
+-- updateAutoUI
 --==================================================
-local function refreshConfigUI()
-    cfgAutoModeVal.Text = autoMode
-    cfgAutoModeVal.TextColor3 = autoMode == "off" and C.Red or C.Green
-    cfgTrainerModeVal.Text = trainerAutoMode
-    cfgTrainerModeVal.TextColor3 = trainerAutoMode == "off" and C.Red or C.Orange
-    cfgWildSlotVal.Text = tostring(autoMoveSlot)
-    cfgTrainerSlotVal.Text = tostring(trainerAutoMoveSlot)
-    cfgHealVal.Text = autoHealEnabled and "ON" or "OFF"
-    cfgHealVal.TextColor3 = autoHealEnabled and C.Teal or C.TextDim
-    cfgThreshVal.Text = tostring(autoHealThreshold) .. "%"
-    wildFilterBtn.BackgroundColor3 = automateWild and C.Wild or C.PanelAlt
-    wildFilterBtn.Text = automateWild and "Wild: ON" or "Wild: OFF"
-    trainerFilterBtn.BackgroundColor3 = automateTrainer and C.Trainer or C.PanelAlt
-    trainerFilterBtn.Text = automateTrainer and "Trainer: ON" or "Trainer: OFF"
-    updateRareCount()
+local function updateAutoUI()
+    UI.wOff.BackgroundColor3  = Auto.wildMode=="off"  and C.Red    or C.AccentDim
+    UI.wMove.BackgroundColor3 = Auto.wildMode=="move" and C.Green  or C.AccentDim
+    UI.wRun.BackgroundColor3  = Auto.wildMode=="run"  and C.Cyan   or C.AccentDim
+    for s=1,4 do
+        wildSlotBtns[s].BackgroundColor3=(Auto.wildSlot==s and Auto.wildMode=="move") and C.Accent or C.AccentDim
+    end
+    UI.tOff.BackgroundColor3  = Auto.trMode=="off"  and C.Red     or C.AccentDim
+    UI.tMove.BackgroundColor3 = Auto.trMode=="move" and C.Trainer or C.AccentDim
+    UI.tRun.BackgroundColor3  = Auto.trMode=="run"  and C.Cyan    or C.AccentDim
+    for s=1,4 do
+        trSlotBtns[s].BackgroundColor3=(Auto.trSlot==s and Auto.trMode=="move") and C.Accent or C.AccentDim
+    end
+    walkBtn2.BackgroundColor3=Auto.walkEnabled and C.Green or C.PanelAlt
+    walkBtn2.Text=Auto.walkEnabled and "🚶 WALKING" or "🚶 AUTO-WALK"
+
+    local ws=Auto.wildMode=="off" and "Wild:OFF" or ("Wild:"..Auto.wildMode:upper().."/"..Auto.wildSlot)
+    local ts=Auto.trMode=="off"   and "Trainer:OFF" or ("Trainer:"..Auto.trMode:upper().."/"..Auto.trSlot)
+    autoStatusLbl2.Text=ws.."  |  "..ts..(State.rareFoundPause and "  [⏸ RARE]" or "")
+
+    -- sync config display
+    UI.cfgAutoModeVal.Text=Auto.wildMode; UI.cfgAutoModeVal.TextColor3=Auto.wildMode=="off" and C.Red or C.Green
+    UI.cfgTrainerModeVal.Text=Auto.trMode; UI.cfgTrainerModeVal.TextColor3=Auto.trMode=="off" and C.Red or C.Trainer
+    UI.cfgWildSlotVal.Text=tostring(Auto.wildSlot)
+    UI.cfgTrainerSlotVal.Text=tostring(Auto.trSlot)
+    UI.wildFilterBtn.BackgroundColor3=Auto.wildOn and C.Wild or C.PanelAlt
+    UI.wildFilterBtn.Text=Auto.wildOn and "Wild: ON" or "Wild: OFF"
+    UI.trainerFilterBtn.BackgroundColor3=Auto.trainerOn and C.Trainer or C.PanelAlt
+    UI.trainerFilterBtn.Text=Auto.trainerOn and "Trainer: ON" or "Trainer: OFF"
 end
 
-cfgWhSave.MouseButton1Click:Connect(function()
-    webhookUrl = cfgWhInput.Text
-    config.webhookUrl = webhookUrl
-    config.pingIds = cfgPingInput.Text
-    saveConfig()
-    sendNotification("LumiWare", "Webhook saved!", 3)
-end)
+-- Wire automation buttons
+track(UI.wOff.MouseButton1Click:Connect(function()  Auto.wildMode="off";  cfg.autoMode="off";  saveConfig(); State.rareFoundPause=false; updateAutoUI() end))
+track(UI.wMove.MouseButton1Click:Connect(function() Auto.wildMode="move"; cfg.autoMode="move"; saveConfig(); updateAutoUI(); notify("LumiWare","Wild MOVE/"..Auto.wildSlot,3) end))
+track(UI.wRun.MouseButton1Click:Connect(function()  Auto.wildMode="run";  cfg.autoMode="run";  saveConfig(); updateAutoUI(); notify("LumiWare","Wild RUN",3) end))
+for s=1,4 do
+    track(wildSlotBtns[s].MouseButton1Click:Connect(function() Auto.wildSlot=s; cfg.autoMoveSlot=s; saveConfig(); updateAutoUI() end))
+end
+track(UI.tOff.MouseButton1Click:Connect(function()  Auto.trMode="off";  cfg.trainerAutoMode="off";  saveConfig(); updateAutoUI() end))
+track(UI.tMove.MouseButton1Click:Connect(function() Auto.trMode="move"; cfg.trainerAutoMode="move"; saveConfig(); updateAutoUI(); notify("LumiWare","Trainer MOVE/"..Auto.trSlot,3) end))
+track(UI.tRun.MouseButton1Click:Connect(function()  Auto.trMode="run";  cfg.trainerAutoMode="run";  saveConfig(); updateAutoUI(); notify("LumiWare","Trainer RUN",3) end))
+for s=1,4 do
+    track(trSlotBtns[s].MouseButton1Click:Connect(function() Auto.trSlot=s; cfg.trainerAutoMoveSlot=s; saveConfig(); updateAutoUI() end))
+end
+track(UI.wildFilterBtn.MouseButton1Click:Connect(function()
+    Auto.wildOn=not Auto.wildOn; cfg.automateWild=Auto.wildOn; updateAutoUI()
+end))
+track(UI.trainerFilterBtn.MouseButton1Click:Connect(function()
+    Auto.trainerOn=not Auto.trainerOn; cfg.automateTrainer=Auto.trainerOn; updateAutoUI()
+end))
+updateAutoUI()
+
+-- Config tab buttons
+local function refreshRareCount()
+    UI.cfgRareCountLbl.Text=#customRares.." rares: "..(#customRares>0 and table.concat(customRares,", ") or "(none)")
+end
+refreshRareCount()
 
 cfgRareAdd.MouseButton1Click:Connect(function()
-    local input = cfgRareInput.Text
-    if input == "" then return end
-    for word in input:gmatch("[^,]+") do
-        local trimmed = word:match("^%s*(.-)%s*$")
-        if trimmed and trimmed ~= "" then table.insert(customRares, trimmed) end
-    end
-    config.customRares = customRares
-    cfgRareInput.Text = ""
-    updateRareCount()
-    sendNotification("LumiWare", "Added to rare list!", 3)
+    local t=cfgRareInput.Text; if t=="" then return end
+    for w in t:gmatch("[^,]+") do local tr=w:match("^%s*(.-)%s*$"); if tr and tr~="" then customRares[#customRares+1]=tr end end
+    cfg.customRares=customRares; cfgRareInput.Text=""; refreshRareCount(); notify("LumiWare","Added!",3)
 end)
-
 cfgRareClear.MouseButton1Click:Connect(function()
-    customRares = {}
-    config.customRares = customRares
-    updateRareCount()
-    sendNotification("LumiWare", "Custom rares cleared.", 3)
+    customRares={}; cfg.customRares=customRares; refreshRareCount(); notify("LumiWare","Cleared.",3)
 end)
-
+cfgWhSave.MouseButton1Click:Connect(function()
+    Webhook.url=cfgWhInput.Text; cfg.webhookUrl=Webhook.url; cfg.pingIds=cfgPingInput.Text; saveConfig()
+    notify("LumiWare","Webhook saved!",3)
+end)
 cfgSaveBtn.MouseButton1Click:Connect(function()
-    config.autoMode = autoMode
-    config.autoMoveSlot = autoMoveSlot
-    config.trainerAutoMode = trainerAutoMode
-    config.trainerAutoMoveSlot = trainerAutoMoveSlot
-    config.autoHealEnabled = autoHealEnabled
-    config.autoHealThreshold = autoHealThreshold
-    config.customRares = customRares
-    config.webhookUrl = webhookUrl
-    config.pingIds = cfgPingInput.Text
-    config.automateTrainer = automateTrainer
-    config.automateWild = automateWild
-    config.healRemoteName = healRemoteName
-    config.healRemotePath = healRemotePath
+    cfg.autoMode=Auto.wildMode; cfg.autoMoveSlot=Auto.wildSlot
+    cfg.trainerAutoMode=Auto.trMode; cfg.trainerAutoMoveSlot=Auto.trSlot
+    cfg.autoHealEnabled=Heal.enabled; cfg.autoHealThreshold=Heal.threshold
+    cfg.customRares=customRares; cfg.webhookUrl=Webhook.url
+    cfg.pingIds=cfgPingInput.Text
+    cfg.automateTrainer=Auto.trainerOn; cfg.automateWild=Auto.wildOn
+    cfg.healRemoteName=Heal.remoteName; cfg.healRemotePath=Heal.remotePath; cfg.autoHealMethod=Heal.method
     saveConfig()
-    cfgStatusLbl.Text = "✅ Config saved at: " .. os.date("%X")
-    cfgStatusLbl.TextColor3 = C.Green
-    sendNotification("LumiWare", "Config saved!", 3)
-    task.delay(3, function()
-        cfgStatusLbl.TextColor3 = C.TextDim
-    end)
+    UI.cfgStatusLbl.Text="✅ Saved at "..os.date("%X"); UI.cfgStatusLbl.TextColor3=C.Green
+    notify("LumiWare","Config saved!",3)
+    task.delay(4,function() UI.cfgStatusLbl.TextColor3=C.Dim end)
 end)
-
 cfgResetBtn.MouseButton1Click:Connect(function()
-    resetConfigToDefault()
-    autoMode = "off"; trainerAutoMode = "off"
-    autoMoveSlot = 1; trainerAutoMoveSlot = 1
-    autoHealEnabled = false; autoHealThreshold = 30
-    customRares = {}; webhookUrl = ""
-    automateTrainer = true; automateWild = true
-    updateAutoUI()
-    refreshConfigUI()
-    cfgStatusLbl.Text = "🔄 Reset to defaults at: " .. os.date("%X")
-    cfgStatusLbl.TextColor3 = C.Orange
-    sendNotification("LumiWare", "Config reset to defaults.", 4)
+    resetCfgDefault()
+    Auto.wildMode="off"; Auto.trMode="off"; Auto.wildSlot=1; Auto.trSlot=1
+    Heal.enabled=false; Heal.threshold=30; customRares={}; Webhook.url=""
+    Auto.wildOn=true; Auto.trainerOn=true
+    updateAutoUI(); refreshRareCount()
+    UI.cfgHealVal.Text="OFF"; UI.cfgHealVal.TextColor3=C.Dim
+    UI.cfgThreshVal.Text="30%"
+    UI.cfgStatusLbl.Text="🔄 Reset at "..os.date("%X"); UI.cfgStatusLbl.TextColor3=C.Trainer
+    notify("LumiWare","Config reset to defaults.",4)
 end)
-
-wildFilterBtn.MouseButton1Click:Connect(function()
-    automateWild = not automateWild
-    config.automateWild = automateWild
-    wildFilterBtn.BackgroundColor3 = automateWild and C.Wild or C.PanelAlt
-    wildFilterBtn.Text = automateWild and "Wild: ON" or "Wild: OFF"
-end)
-trainerFilterBtn.MouseButton1Click:Connect(function()
-    automateTrainer = not automateTrainer
-    config.automateTrainer = automateTrainer
-    trainerFilterBtn.BackgroundColor3 = automateTrainer and C.Trainer or C.PanelAlt
-    trainerFilterBtn.Text = automateTrainer and "Trainer: ON" or "Trainer: OFF"
-end)
-
-refreshConfigUI()
 
 --==================================================
--- AUTO-HEAL SYSTEM (NEW v4.6)
+-- HEAL SYSTEM
 --==================================================
-
--- Keywords that suggest a remote is heal-related
-local HEAL_KEYWORDS = {
-    "heal", "nurse", "restore", "recovery", "clinic", "center",
-    "pokecenter", "loomacenter", "inn", "rest", "fullrestore"
-}
-local HEAL_BUTTON_KEYWORDS = {
-    "heal", "nurse", "restore", "yes", "confirm", "rest"
-}
-
-local function looksLikeHealRemote(name, path)
-    local nl = string.lower(name)
-    local pl = string.lower(path)
-    for _, kw in ipairs(HEAL_KEYWORDS) do
-        if string.find(nl, kw) or string.find(pl, kw) then return true end
-    end
+local HEAL_KW={"heal","nurse","restore","recovery","clinic","center","loomacenter","inn","rest","fullrestore"}
+local HEAL_BTN_KW={"heal","nurse","restore","yes","confirm","rest"}
+local function looksHeal(name,path)
+    local nl,pl=name:lower(),(path or ""):lower()
+    for _,k in ipairs(HEAL_KW) do if nl:find(k) or pl:find(k) then return true end end
     return false
 end
 
-local function getFullPath(obj)
-    local path = obj.Name
-    local current = obj.Parent
-    while current and current ~= game do
-        path = current.Name .. "/" .. path
-        current = current.Parent
-    end
-    return path
-end
-
-local function addHealRemoteEntry(name, path, remote, isButton)
-    local entry = {
-        name = name,
-        path = path,
-        remote = remote,
-        isButton = isButton,
-    }
-    table.insert(scannedHealRemotes, entry)
-
-    -- Add to scroll list
-    local row = Instance.new("Frame")
-    row.Size = UDim2.new(1, -4, 0, 20)
-    row.BackgroundTransparency = 1
-
-    local nameLbl = Instance.new("TextLabel", row)
-    nameLbl.Size = UDim2.new(1, -52, 1, 0)
-    nameLbl.BackgroundTransparency = 1
-    nameLbl.Text = (isButton and "🔘 " or "📡 ") .. name
-    nameLbl.Font = Enum.Font.Code
-    nameLbl.TextSize = 9
-    nameLbl.TextColor3 = isButton and C.Cyan or C.Teal
-    nameLbl.TextXAlignment = Enum.TextXAlignment.Left
-    nameLbl.TextTruncate = Enum.TextTruncate.AtEnd
-
-    local selectBtn = Instance.new("TextButton", row)
-    selectBtn.Size = UDim2.fromOffset(48, 16)
-    selectBtn.Position = UDim2.new(1, -50, 0, 2)
-    selectBtn.BackgroundColor3 = C.AccentDim
-    selectBtn.Text = "USE"
-    selectBtn.Font = Enum.Font.GothamBold
-    selectBtn.TextSize = 9
-    selectBtn.TextColor3 = C.Text
-    selectBtn.BorderSizePixel = 0
-    Instance.new("UICorner", selectBtn).CornerRadius = UDim.new(0, 4)
-
-    track(selectBtn.MouseButton1Click:Connect(function()
-        healRemoteName = name
-        healRemotePath = path
-        healRemote = remote
-        autoHealMethod = isButton and "button" or "remote"
-        config.healRemoteName = healRemoteName
-        config.healRemotePath = healRemotePath
-        config.autoHealMethod = autoHealMethod
-        saveConfig()
-        healSelectedName.Text = (isButton and "Button: " or "Remote: ") .. name
-        healSelectedName.TextColor3 = C.Teal
-        healSelectedPath.Text = path
-        selectBtn.BackgroundColor3 = C.Teal
-        selectBtn.Text = "✓ SET"
-        addHealLog("✅ Selected: " .. name, C.Teal)
-        sendNotification("LumiWare", "Heal source set: " .. name, 4)
+local function addHealEntry(name,path,remote,isBtn)
+    local entry={name=name,path=path,remote=remote,isButton=isBtn}
+    Heal.scanned[#Heal.scanned+1]=entry
+    local row=frame(UI.healRemoteScroll,{Size=UDim2.new(1,-4,0,20),BackgroundTransparency=1})
+    lbl(row,{Size=UDim2.new(1,-54,1,0),Text=(isBtn and "🔘 " or "📡 ")..name,
+        Font=Enum.Font.Code,TextSize=9,TextColor3=isBtn and C.Cyan or C.Teal,
+        TextXAlignment=Enum.TextXAlignment.Left,TextTruncate=Enum.TextTruncate.AtEnd})
+    local selBtn=btn(row,{Size=UDim2.fromOffset(48,16),Position=UDim2.new(1,-50,0,2),
+        BackgroundColor3=C.AccentDim,Text="USE",Font=Enum.Font.GothamBold,TextSize=9,TextColor3=C.Text}); corner(selBtn,4)
+    track(selBtn.MouseButton1Click:Connect(function()
+        Heal.remoteName=name; Heal.remotePath=path; Heal.remote=remote
+        Heal.method=isBtn and "button" or "remote"
+        cfg.healRemoteName=name; cfg.healRemotePath=path; cfg.autoHealMethod=Heal.method; saveConfig()
+        UI.healSelName.Text=(isBtn and "Button: " or "Remote: ")..name; UI.healSelName.TextColor3=C.Teal
+        UI.healSelPath.Text=path; selBtn.BackgroundColor3=C.Teal; selBtn.Text="✓ SET"
+        addHealLog("✅ Selected: "..name,C.Teal); notify("LumiWare","Heal source set: "..name,4)
+        UI.cfgHealVal.Text="Remote set"; UI.cfgHealVal.TextColor3=C.Teal
     end))
-
-    row.Parent = healRemoteScroll
 end
 
--- Scan for heal remotes
-healScanBtn.MouseButton1Click:Connect(function()
-    -- Clear existing list
-    for _, v in ipairs(healRemoteScroll:GetChildren()) do
-        if not v:IsA("UIListLayout") then v:Destroy() end
-    end
-    scannedHealRemotes = {}
-
-    healScanStatusLbl.Text = "⏳ Scanning for heal remotes..."
-    healScanStatusLbl.TextColor3 = C.Orange
-
-    task.spawn(function()
-        local found = 0
-        local function scanService(svc)
-            pcall(function()
-                for _, obj in ipairs(svc:GetDescendants()) do
-                    if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
-                        local path = getFullPath(obj)
-                        if looksLikeHealRemote(obj.Name, path) then
-                            addHealRemoteEntry(obj.Name, path, obj, false)
-                            found = found + 1
-                            addHealLog("Found remote: " .. obj.Name .. " @ " .. path, C.Teal)
-                        end
-                    end
-                end
-            end)
-        end
-
-        scanService(ReplicatedStorage)
-        scanService(game:GetService("Workspace"))
-        pcall(function() scanService(player:WaitForChild("PlayerGui")) end)
-
-        if found == 0 then
-            healScanStatusLbl.Text = "⚠ No heal remotes found. Try entering a heal center first."
-            healScanStatusLbl.TextColor3 = C.Orange
-        else
-            healScanStatusLbl.Text = "✅ Found " .. found .. " heal remote(s). Click USE to select."
-            healScanStatusLbl.TextColor3 = C.Teal
-        end
-
-        healScanSec.Size = UDim2.new(1, -8, 0, math.max(120, 80 + found * 22))
-        healRemoteScroll.Size = UDim2.new(1, -16, 0, math.min(60, math.max(22, found * 22)))
-    end)
-end)
-
--- Scan for heal buttons in PlayerGui
-healScanBtnBtn.MouseButton1Click:Connect(function()
-    for _, v in ipairs(healRemoteScroll:GetChildren()) do
-        if not v:IsA("UIListLayout") then v:Destroy() end
-    end
-    scannedHealRemotes = {}
-
-    healScanStatusLbl.Text = "⏳ Scanning for heal buttons..."
-    healScanStatusLbl.TextColor3 = C.Cyan
-
-    task.spawn(function()
-        local found = 0
-        local pgui = player:FindFirstChild("PlayerGui")
-        if not pgui then
-            healScanStatusLbl.Text = "⚠ PlayerGui not found"
-            return
-        end
-
-        local function scanNode(inst, depth)
-            if depth > 15 then return end
-            for _, child in ipairs(inst:GetChildren()) do
-                if child:IsA("TextButton") or child:IsA("ImageButton") then
-                    local name = child.Name
-                    local text = child:IsA("TextButton") and child.Text or ""
-                    local nl = string.lower(name)
-                    local tl = string.lower(text)
-                    for _, kw in ipairs(HEAL_BUTTON_KEYWORDS) do
-                        if string.find(nl, kw) or string.find(tl, kw) then
-                            local path = getFullPath(child)
-                            addHealRemoteEntry(name .. " [" .. text .. "]", path, child, true)
-                            found = found + 1
-                            addHealLog("Found button: " .. name .. " (" .. text .. ")", C.Cyan)
-                            break
-                        end
-                    end
-                end
-                scanNode(child, depth + 1)
-            end
-        end
-        scanNode(pgui, 0)
-
-        if found == 0 then
-            healScanStatusLbl.Text = "⚠ No heal buttons found. Go near a heal center and scan again."
-            healScanStatusLbl.TextColor3 = C.Orange
-        else
-            healScanStatusLbl.Text = "✅ Found " .. found .. " heal button(s). Click USE to select."
-            healScanStatusLbl.TextColor3 = C.Cyan
-        end
-
-        healScanSec.Size = UDim2.new(1, -8, 0, math.max(120, 80 + found * 22))
-        healRemoteScroll.Size = UDim2.new(1, -16, 0, math.min(60, math.max(22, found * 22)))
-    end)
-end)
-
--- Perform heal action
 local function performHeal()
-    if not healRemote then
-        addHealLog("⚠ No heal source selected!", C.Red)
-        return false
-    end
-    if autoHealMethod == "button" then
+    if not Heal.remote then addHealLog("⚠ No heal source!",C.Red); return false end
+    if Heal.method=="button" then
         pcall(function()
-            local p, s = healRemote.AbsolutePosition, healRemote.AbsoluteSize
-            local cx, cy = p.X + s.X/2, p.Y + s.Y/2
-            VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, true, game, 1)
-            task.wait(0.05)
-            VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, false, game, 1)
+            local p,s=Heal.remote.AbsolutePosition,Heal.remote.AbsoluteSize
+            local cx,cy=p.X+s.X/2,p.Y+s.Y/2
+            Svc.VIM:SendMouseButtonEvent(cx,cy,0,true,game,1); task.wait(0.05)
+            Svc.VIM:SendMouseButtonEvent(cx,cy,0,false,game,1)
         end)
-        addHealLog("💊 Heal button clicked", C.Teal)
+        addHealLog("💊 Heal button clicked",C.Teal)
     else
         pcall(function()
-            if healRemote:IsA("RemoteEvent") then
-                healRemote:FireServer()
-            elseif healRemote:IsA("RemoteFunction") then
-                healRemote:InvokeServer()
-            end
+            if Heal.remote:IsA("RemoteEvent") then Heal.remote:FireServer()
+            else Heal.remote:InvokeServer() end
         end)
-        addHealLog("💊 Heal remote fired: " .. healRemoteName, C.Teal)
+        addHealLog("💊 Remote fired: "..Heal.remoteName,C.Teal)
     end
-    lastHealTime = tick()
-    return true
+    Heal.lastTime=tick(); return true
 end
 
--- Test heal
-healTestBtn.MouseButton1Click:Connect(function()
-    addHealLog("🧪 Manual heal test triggered", C.Orange)
-    performHeal()
-end)
-
-healClearBtn.MouseButton1Click:Connect(function()
-    healRemote = nil
-    healRemoteName = ""
-    healRemotePath = ""
-    config.healRemoteName = ""
-    config.healRemotePath = ""
-    saveConfig()
-    healSelectedName.Text = "None selected"
-    healSelectedName.TextColor3 = C.TextDim
-    healSelectedPath.Text = "Path: —"
-    addHealLog("Heal source cleared", C.TextDim)
-end)
-
--- Auto-heal toggle buttons
-healOnBtn.MouseButton1Click:Connect(function()
-    autoHealEnabled = true
-    config.autoHealEnabled = true
-    saveConfig()
-    healOnBtn.BackgroundColor3 = C.Teal
-    healOffBtn.BackgroundColor3 = C.AccentDim
-    refreshConfigUI()
-    sendNotification("LumiWare", "Auto-Heal ENABLED (< " .. autoHealThreshold .. "%)", 4)
-    addHealLog("✅ Auto-Heal ON (< " .. autoHealThreshold .. "%)", C.Teal)
-end)
-
-healOffBtn.MouseButton1Click:Connect(function()
-    autoHealEnabled = false
-    config.autoHealEnabled = false
-    saveConfig()
-    healOnBtn.BackgroundColor3 = C.AccentDim
-    healOffBtn.BackgroundColor3 = C.Red
-    refreshConfigUI()
-    addHealLog("❌ Auto-Heal OFF", C.TextDim)
-end)
-
-healThreshInput.FocusLost:Connect(function()
-    local val = tonumber(healThreshInput.Text)
-    if val and val >= 1 and val <= 99 then
-        autoHealThreshold = math.floor(val)
-        config.autoHealThreshold = autoHealThreshold
-        saveConfig()
-        refreshConfigUI()
-    else
-        healThreshInput.Text = tostring(autoHealThreshold)
+local function doScan(scanButtons)
+    for _,v in ipairs(UI.healRemoteScroll:GetChildren()) do
+        if not v:IsA("UIListLayout") then v:Destroy() end
     end
-end)
-
--- Auto-heal monitor thread
-local healMonitorThread = task.spawn(function()
-    while not _G.LumiWare_StopFlag do
-        if not gui.Parent then break end
-        if autoHealEnabled and healRemote and battleState ~= "active" then
-            -- Check player's active Loomian HP from battle data (if available)
-            if currentBattle.playerStats and currentBattle.playerStats.hp and currentBattle.playerStats.maxHP then
-                local pct = (currentBattle.playerStats.hp / currentBattle.playerStats.maxHP) * 100
-                if pct < autoHealThreshold and (tick() - lastHealTime) > healCooldown then
-                    addHealLog(string.format("⚠ HP low (%.0f%%) — auto-healing!", pct), C.Orange)
-                    performHeal()
-                end
-            end
-        end
-        task.wait(3)
-    end
-end)
-if _G.LumiWare_Threads then table.insert(_G.LumiWare_Threads, healMonitorThread) end
-
---==================================================
--- SCAN UI (moved to button handler)
---==================================================
-scanBtn.MouseButton1Click:Connect(function()
-    log("SCAN", "========== SCANNING PlayerGui ==========")
-    addBattleLog("🔍 Scanning PlayerGui for buttons...", C.Orange)
-    local pgui = player:FindFirstChild("PlayerGui")
-    if not pgui then addBattleLog("⚠ PlayerGui not found", C.Red); return end
-    local btnCount = 0
-    local function scanNode(inst, path, depth)
-        if depth > 15 then return end
-        for _, child in ipairs(inst:GetChildren()) do
-            local childPath = path .. "/" .. child.Name
-            local isBtn = child:IsA("TextButton") or child:IsA("ImageButton")
-            if isBtn then
-                btnCount = btnCount + 1
-                local text = child:IsA("TextButton") and child.Text or "[ImageBtn]"
-                local vis = child.Visible and "V" or "H"
-                local info = string.format("[%s] %s | text=%q class=%s size=%dx%d",
-                    vis, childPath, text, child.ClassName,
-                    math.floor(child.AbsoluteSize.X), math.floor(child.AbsoluteSize.Y))
-                log("SCAN", info)
-                addBattleLog("🔘 " .. child.Name .. " | " .. text .. " [" .. vis .. "]", C.Orange)
-            end
-            scanNode(child, childPath, depth + 1)
-        end
-    end
-    scanNode(pgui, "PlayerGui", 0)
-    log("SCAN", "Total buttons found: " .. btnCount)
-    addBattleLog("🔍 Scan: " .. btnCount .. " buttons (check F9 console)", C.Orange)
-    sendNotification("LumiWare", "Scan: " .. btnCount .. " buttons.\nCheck F9 console.", 5)
-end)
-
--- Outgoing remote spy
-pcall(function()
-    if hookmetamethod then
-        local oldNamecall
-        oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
-            local method = getnamecallmethod()
-            if method == "FireServer" and self:IsA("RemoteEvent") then
-                if discoveryMode and self.Name == "EVT" then
-                    local args = {...}
-                    local parts = {}
-                    for i = 1, math.min(#args, 6) do
-                        if type(args[i]) == "string" then
-                            table.insert(parts, "arg" .. i .. '="' .. string.sub(args[i], 1, 30) .. '"')
-                        elseif type(args[i]) == "table" then
-                            table.insert(parts, "arg" .. i .. "=table")
-                        elseif type(args[i]) == "number" then
-                            table.insert(parts, "arg" .. i .. "=" .. tostring(args[i]))
-                        else
-                            table.insert(parts, "arg" .. i .. "=" .. type(args[i]))
-                        end
-                    end
-                    log("OUTGOING", ">>> " .. self.Name .. ":FireServer(" .. table.concat(parts, ", ") .. ")")
-                    addBattleLog("📤 OUT " .. self.Name .. " | " .. table.concat(parts, ", "), Color3.fromRGB(255, 180, 80))
-                end
-                -- NEW: intercept heal remotes for auto-detection
+    Heal.scanned={}
+    UI.healScanStatus.Text="⏳ Scanning..."
+    task.spawn(function()
+        local found=0
+        if not scanButtons then
+            local function scanSvc(svc)
                 pcall(function()
-                    if looksLikeHealRemote(self.Name, getFullPath(self)) then
-                        if healRemoteName == "" then
-                            local path = getFullPath(self)
-                            addHealLog("🔍 Auto-detected heal remote: " .. self.Name, C.Teal)
-                            addHealRemoteEntry(self.Name, path, self, false)
-                            healScanStatusLbl.Text = "✅ Auto-detected: " .. self.Name
-                            healScanStatusLbl.TextColor3 = C.Teal
+                    for _,obj in ipairs(svc:GetDescendants()) do
+                        if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
+                            local path=getPath(obj)
+                            if looksHeal(obj.Name,path) then
+                                addHealEntry(obj.Name,path,obj,false); found=found+1
+                                addHealLog("Remote: "..obj.Name,C.Teal)
+                            end
                         end
                     end
                 end)
             end
-            return oldNamecall(self, ...)
+            scanSvc(Svc.RS); scanSvc(workspace)
+            pcall(function() scanSvc(player:WaitForChild("PlayerGui")) end)
+        else
+            local pgui=player:FindFirstChild("PlayerGui")
+            if pgui then
+                local function scanNode(inst,depth)
+                    if depth>15 then return end
+                    for _,ch in ipairs(inst:GetChildren()) do
+                        if ch:IsA("TextButton") or ch:IsA("ImageButton") then
+                            local nm,tx=ch.Name,(ch:IsA("TextButton") and ch.Text or "")
+                            local nl,tl=nm:lower(),tx:lower()
+                            for _,k in ipairs(HEAL_BTN_KW) do
+                                if nl:find(k) or tl:find(k) then
+                                    local path=getPath(ch)
+                                    addHealEntry(nm.." ["..tx.."]",path,ch,true); found=found+1
+                                    addHealLog("Button: "..nm.." ("..tx..")",C.Cyan); break
+                                end
+                            end
+                        end
+                        scanNode(ch,depth+1)
+                    end
+                end
+                scanNode(pgui,0)
+            end
+        end
+        UI.healScanStatus.Text=found==0 and "⚠ None found — try near a heal center" or ("✅ Found "..found.." source(s) — click USE to select")
+        UI.healScanStatus.TextColor3=found==0 and C.Trainer or C.Teal
+    end)
+end
+
+UI.healScanRemBtn.MouseButton1Click:Connect(function() doScan(false) end)
+UI.healScanBtnBtn.MouseButton1Click:Connect(function() doScan(true) end)
+UI.healTestBtn.MouseButton1Click:Connect(function() addHealLog("🧪 Manual test",C.Trainer); performHeal() end)
+UI.healClearBtn.MouseButton1Click:Connect(function()
+    Heal.remote=nil; Heal.remoteName=""; Heal.remotePath=""
+    cfg.healRemoteName=""; cfg.healRemotePath=""; saveConfig()
+    UI.healSelName.Text="None selected"; UI.healSelName.TextColor3=C.Dim
+    UI.healSelPath.Text="Path: —"; addHealLog("Cleared",C.Dim)
+end)
+UI.healOnBtn.MouseButton1Click:Connect(function()
+    Heal.enabled=true; cfg.autoHealEnabled=true; saveConfig()
+    UI.healOnBtn.BackgroundColor3=C.Teal; UI.healOffBtn.BackgroundColor3=C.AccentDim
+    UI.cfgHealVal.Text="ON"; UI.cfgHealVal.TextColor3=C.Teal
+    notify("LumiWare","Auto-Heal ON (< "..Heal.threshold.."%)",4)
+    addHealLog("✅ Auto-Heal ON",C.Teal)
+end)
+UI.healOffBtn.MouseButton1Click:Connect(function()
+    Heal.enabled=false; cfg.autoHealEnabled=false; saveConfig()
+    UI.healOnBtn.BackgroundColor3=C.AccentDim; UI.healOffBtn.BackgroundColor3=C.Red
+    UI.cfgHealVal.Text="OFF"; UI.cfgHealVal.TextColor3=C.Dim
+    addHealLog("❌ Auto-Heal OFF",C.Dim)
+end)
+UI.healThreshInput.FocusLost:Connect(function()
+    local v=tonumber(UI.healThreshInput.Text)
+    if v and v>=1 and v<=99 then
+        Heal.threshold=math.floor(v); cfg.autoHealThreshold=Heal.threshold; saveConfig()
+        UI.cfgThreshVal.Text=tostring(Heal.threshold).."%"
+    else UI.healThreshInput.Text=tostring(Heal.threshold) end
+end)
+
+-- SCAN UI button
+scanBtn2.MouseButton1Click:Connect(function()
+    addBattleLog("🔍 Scanning buttons...",C.Trainer)
+    task.spawn(function()
+        local pgui=player:FindFirstChild("PlayerGui"); if not pgui then return end
+        local n=0
+        local function sc(inst,path,depth)
+            if depth>15 then return end
+            for _,ch in ipairs(inst:GetChildren()) do
+                local cp=path.."/"..ch.Name
+                if ch:IsA("TextButton") or ch:IsA("ImageButton") then
+                    n=n+1
+                    local tx=ch:IsA("TextButton") and ch.Text or "[Img]"
+                    log("SCAN",("[%s] %s | text=%q"):format(ch.Visible and "V" or "H",cp,tx))
+                    addBattleLog("🔘 "..ch.Name.." | "..tx,C.Trainer)
+                end
+                sc(ch,cp,depth+1)
+            end
+        end
+        sc(pgui,"PlayerGui",0)
+        addBattleLog("🔍 "..n.." buttons (F9 for paths)",C.Trainer)
+        notify("LumiWare","Scan: "..n.." buttons — check F9",5)
+    end)
+end)
+
+--==================================================
+-- OUTGOING SPY + HEAL AUTODETECT
+--==================================================
+pcall(function()
+    if hookmetamethod then
+        local old; old=hookmetamethod(game,"__namecall",function(self,...)
+            local method=getnamecallmethod()
+            if method=="FireServer" and self:IsA("RemoteEvent") then
+                if State.discoveryMode and self.Name=="EVT" then
+                    local args={...}; local parts={}
+                    for i=1,math.min(#args,6) do
+                        parts[#parts+1]="arg"..i.."="..(type(args[i])=="string" and '"'..args[i]:sub(1,20)..'"' or type(args[i]))
+                    end
+                    addBattleLog("📤 "..self.Name.." | "..table.concat(parts,", "),Color3.fromRGB(255,180,80))
+                end
+                pcall(function()
+                    if Heal.remoteName=="" and looksHeal(self.Name,getPath(self)) then
+                        addHealEntry(self.Name,getPath(self),self,false)
+                        UI.healScanStatus.Text="✅ Auto-detected: "..self.Name; UI.healScanStatus.TextColor3=C.Teal
+                        addHealLog("🔍 Auto-detected: "..self.Name,C.Teal)
+                    end
+                end)
+            end
+            return old(self,...)
         end)
-        log("HOOK", "Outgoing remote spy + heal detector installed")
+        log("HOOK","Namecall spy installed")
     end
 end)
 
 --==================================================
 -- AUTO-WALK
 --==================================================
-local function startAutoWalk()
-    if autoWalkThread then return end
-    autoWalkThread = task.spawn(function()
-        _G.LumiWare_WalkThread = autoWalkThread
-        log("INFO", "Auto-walk started")
-        local char = player.Character or player.CharacterAdded:Wait()
-        local humanoid = char:WaitForChild("Humanoid")
-        local rootPart = char:WaitForChild("HumanoidRootPart")
-        local center = rootPart.Position
-        local radius = 6
-        local numPoints = 12
-        local pointIndex = 0
-        local heartbeat = RunService.Heartbeat
-
-        while autoWalkEnabled and gui.Parent do
-            if battleState == "active" then
-                pcall(function()
-                    VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.LeftShift, false, game)
-                    VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.LeftShift, false, game)
-                end)
+local function startWalk()
+    if Auto.walkThread then return end
+    Auto.walkThread=task.spawn(function()
+        _G.LumiWare_WalkThread=Auto.walkThread
+        local char=player.Character or player.CharacterAdded:Wait()
+        local hum=char:WaitForChild("Humanoid")
+        local rp=char:WaitForChild("HumanoidRootPart")
+        local center=rp.Position; local r=6; local n=12; local pi=0
+        while Auto.walkEnabled and gui.Parent do
+            if State.battleState=="active" then
+                pcall(function() Svc.VIM:SendKeyEvent(false,Enum.KeyCode.LeftShift,false,game) end)
                 task.wait(0.5)
             else
-                char = player.Character
-                if not char then task.wait(1)
+                char=player.Character; if not char then task.wait(1)
                 else
-                    humanoid = char:FindFirstChild("Humanoid")
-                    rootPart = char:FindFirstChild("HumanoidRootPart")
-                    if not humanoid or not rootPart or humanoid.Health <= 0 then
-                        task.wait(1)
+                    hum=char:FindFirstChild("Humanoid"); rp=char:FindFirstChild("HumanoidRootPart")
+                    if not hum or not rp or hum.Health<=0 then task.wait(1)
                     else
-                        pcall(function()
-                            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.LeftShift, false, game)
-                        end)
-                        local angle = (pointIndex / numPoints) * math.pi * 2
-                        local targetPos = center + Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius)
-                        pointIndex = (pointIndex + 1) % numPoints
-                        humanoid:MoveTo(targetPos)
-                        local moveStart = tick()
-                        while autoWalkEnabled and (tick() - moveStart) < 2 do
-                            heartbeat:Wait()
-                            if not rootPart or not rootPart.Parent then break end
-                            if (rootPart.Position - targetPos).Magnitude < 2 then break end
+                        pcall(function() Svc.VIM:SendKeyEvent(true,Enum.KeyCode.LeftShift,false,game) end)
+                        local angle=(pi/n)*math.pi*2
+                        local target=center+Vector3.new(math.cos(angle)*r,0,math.sin(angle)*r)
+                        pi=(pi+1)%n; hum:MoveTo(target)
+                        local ms=tick()
+                        while Auto.walkEnabled and (tick()-ms)<2 do
+                            Svc.Run.Heartbeat:Wait()
+                            if not rp or not rp.Parent then break end
+                            if (rp.Position-target).Magnitude<2 then break end
                         end
                     end
                 end
             end
         end
-        pcall(function() VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.LeftShift, false, game) end)
-        log("INFO", "Auto-walk stopped")
+        pcall(function() Svc.VIM:SendKeyEvent(false,Enum.KeyCode.LeftShift,false,game) end)
     end)
 end
-
-local function stopAutoWalk()
-    autoWalkEnabled = false
-    if autoWalkThread then pcall(function() task.cancel(autoWalkThread) end); autoWalkThread = nil end
+local function stopWalk()
+    Auto.walkEnabled=false
+    if Auto.walkThread then pcall(function() task.cancel(Auto.walkThread) end); Auto.walkThread=nil end
     pcall(function()
-        local char = player.Character
-        if char then
-            local h = char:FindFirstChild("Humanoid")
-            local rp = char:FindFirstChild("HumanoidRootPart")
-            if h and rp then h:MoveTo(rp.Position) end
+        local ch=player.Character; if ch then
+            local h=ch:FindFirstChild("Humanoid"); local r2=ch:FindFirstChild("HumanoidRootPart")
+            if h and r2 then h:MoveTo(r2.Position) end
         end
     end)
-    pcall(function() VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.LeftShift, false, game) end)
+    pcall(function() Svc.VIM:SendKeyEvent(false,Enum.KeyCode.LeftShift,false,game) end)
 end
-
-walkBtn.MouseButton1Click:Connect(function()
-    autoWalkEnabled = not autoWalkEnabled
-    config.autoWalk = autoWalkEnabled
-    saveConfig()
-    updateAutoUI()
-    if autoWalkEnabled then
-        startAutoWalk()
-        sendNotification("LumiWare", "Auto-walk ON", 3)
-        addBattleLog("🚶 Auto-walk ON", C.Green)
-    else
-        stopAutoWalk()
-        sendNotification("LumiWare", "Auto-walk OFF", 3)
-        addBattleLog("🚶 Auto-walk OFF", C.TextDim)
-    end
+walkBtn2.MouseButton1Click:Connect(function()
+    Auto.walkEnabled=not Auto.walkEnabled; cfg.autoWalk=Auto.walkEnabled; saveConfig(); updateAutoUI()
+    if Auto.walkEnabled then startWalk(); addBattleLog("🚶 Walk ON",C.Green)
+    else stopWalk(); addBattleLog("🚶 Walk OFF",C.Dim) end
 end)
-addHoverEffect(walkBtn, C.AccentDim, C.Accent)
 
 --==================================================
--- BATTLE UI DETECTION
+-- BATTLE UI FINDER
 --==================================================
-local cachedMoveNames = {}
-local cachedBattleGui = nil
-local battleGuiDumped = false
+local BtnCache={run=nil,fight=nil,moves={},moveN={}}
+local btnsScanned=false
+local cachedBG=nil; local bgDumped=false
+local cachedMoveNames={}
 
-local function getBattleGui()
-    if cachedBattleGui then
-        local ok, hasParent = pcall(function() return cachedBattleGui.Parent ~= nil end)
-        if ok and hasParent then return cachedBattleGui end
-        cachedBattleGui = nil
+local function getBG()
+    if cachedBG then
+        local ok,ok2=pcall(function() return cachedBG.Parent~=nil end)
+        if ok and ok2 then return cachedBG end; cachedBG=nil
     end
-    local pgui = player:FindFirstChild("PlayerGui")
-    if not pgui then return nil end
-    local bg = nil
+    local pgui=player:FindFirstChild("PlayerGui"); if not pgui then return nil end
+    local bg=nil
     pcall(function()
-        local m = pgui:FindFirstChild("MainGui")
-        if m then
-            local f = m:FindFirstChild("Frame")
-            if f then bg = f:FindFirstChild("BattleGui") end
-        end
+        local m=pgui:FindFirstChild("MainGui"); if m then local f=m:FindFirstChild("Frame"); if f then bg=f:FindFirstChild("BattleGui") end end
     end)
-    if not bg then pcall(function() bg = pgui:FindFirstChild("BattleGui", true) end) end
+    if not bg then pcall(function() bg=pgui:FindFirstChild("BattleGui",true) end) end
     if bg then
-        cachedBattleGui = bg
-        if not battleGuiDumped then
-            battleGuiDumped = true
-            pcall(function()
-                log("AUTO", "=== BattleGui children ===")
-                for _, ch in ipairs(bg:GetChildren()) do
-                    log("AUTO", "  " .. ch.Name .. " (" .. ch.ClassName .. ") Visible=" .. tostring(ch.Visible))
-                end
-                log("AUTO", "=== end ===")
-            end)
-        end
+        cachedBG=bg
+        if not bgDumped then bgDumped=true; pcall(function()
+            log("AUTO","=== BattleGui children ===")
+            for _,ch in ipairs(bg:GetChildren()) do log("AUTO","  "..ch.Name.." ("..ch.ClassName..") V="..tostring(ch.Visible)) end
+        end) end
     end
     return bg
 end
 
-local cachedBtns = {run = nil, fight = nil, moves = {}, moveN = {}}
-local btnsScanned = false
+local function hasMove(ui) return ui and (ui.moveButtons[1] or ui.moveButtons[2] or ui.moveButtons[3] or ui.moveButtons[4]) and true or false end
 
-local function hasAnyMove(ui)
-    return ui and (ui.moveButtons[1] or ui.moveButtons[2] or ui.moveButtons[3] or ui.moveButtons[4]) and true or false
-end
-
-local function findBattleUI()
-    local battleGui = getBattleGui()
-    if not battleGui then btnsScanned = false; return nil end
-
-    local result = { runButton = nil, fightButton = nil, moveButtons = {}, moveNames = {} }
-
+local function findUI()
+    local bg=getBG(); if not bg then btnsScanned=false; return nil end
+    local res={runButton=nil,fightButton=nil,moveButtons={},moveNames={}}
     if btnsScanned then
-        local valid = true
+        local valid=true
         pcall(function()
-            if cachedBtns.run and not cachedBtns.run.Parent then valid = false end
-            if cachedBtns.fight and not cachedBtns.fight.Parent then valid = false end
+            if BtnCache.run and not BtnCache.run.Parent then valid=false end
+            if BtnCache.fight and not BtnCache.fight.Parent then valid=false end
         end)
         if valid then
             pcall(function()
-                if cachedBtns.run and cachedBtns.run.Parent and cachedBtns.run.Parent.Visible then
-                    result.runButton = cachedBtns.run
+                if BtnCache.run and BtnCache.run.Parent and BtnCache.run.Parent.Visible then res.runButton=BtnCache.run end
+                if BtnCache.fight and BtnCache.fight.Parent then
+                    local anc=BtnCache.fight.Parent; local v=true
+                    while anc and anc~=bg do if anc:IsA("GuiObject") and not anc.Visible then v=false break end; anc=anc.Parent end
+                    if v then res.fightButton=BtnCache.fight end
                 end
-                if cachedBtns.fight and cachedBtns.fight.Parent then
-                    local anc = cachedBtns.fight.Parent
-                    local v = true
-                    while anc and anc ~= battleGui do
-                        if anc:IsA("GuiObject") and not anc.Visible then v = false; break end
-                        anc = anc.Parent
-                    end
-                    if v then result.fightButton = cachedBtns.fight end
-                end
-                for i = 1, 4 do
-                    local mb = cachedBtns.moves[i]
-                    if mb and mb.Parent and mb.Parent.Visible then
-                        result.moveButtons[i] = mb
-                        result.moveNames[i] = cachedBtns.moveN[i]
-                    end
-                end
+                for i=1,4 do local mb=BtnCache.moves[i]; if mb and mb.Parent and mb.Parent.Visible then res.moveButtons[i]=mb; res.moveNames[i]=BtnCache.moveN[i] end end
             end)
-            if not cachedBtns.moves[1] and not cachedBtns.moves[2]
-               and not cachedBtns.moves[3] and not cachedBtns.moves[4] then
-                btnsScanned = false
-            else
-                return result
-            end
-        end
-        btnsScanned = false
+            if not BtnCache.moves[1] and not BtnCache.moves[2] and not BtnCache.moves[3] and not BtnCache.moves[4] then btnsScanned=false
+            else return res end
+        end; btnsScanned=false
     end
-
     pcall(function()
-        local moveSlots = {Move1=1, Move2=2, Move3=3, Move4=4}
-        for _, desc in ipairs(battleGui:GetDescendants()) do
-            if desc:IsA("ImageButton") and desc.Name == "Button" and desc.Parent then
-                local pn = desc.Parent.Name
-                if pn == "Run" then
-                    cachedBtns.run = desc
-                    if desc.Parent.Visible then result.runButton = desc end
-                elseif moveSlots[pn] then
-                    local slot = moveSlots[pn]
-                    cachedBtns.moves[slot] = desc
+        local ms={Move1=1,Move2=2,Move3=3,Move4=4}
+        for _,desc in ipairs(bg:GetDescendants()) do
+            if desc:IsA("ImageButton") and desc.Name=="Button" and desc.Parent then
+                local pn=desc.Parent.Name
+                if pn=="Run" then BtnCache.run=desc; if desc.Parent.Visible then res.runButton=desc end
+                elseif ms[pn] then
+                    local sl=ms[pn]; BtnCache.moves[sl]=desc
                     if desc.Parent.Visible then
-                        result.moveButtons[slot] = desc
-                        if not cachedMoveNames[slot] then
-                            local txt = desc.Parent:FindFirstChildOfClass("TextLabel")
-                            if not txt then txt = desc:FindFirstChildOfClass("TextLabel") end
-                            if txt and txt.Text and txt.Text ~= "" then
-                                cachedMoveNames[slot] = txt.Text:lower()
-                            end
+                        res.moveButtons[sl]=desc
+                        if not cachedMoveNames[sl] then
+                            local tx=desc.Parent:FindFirstChildOfClass("TextLabel") or desc:FindFirstChildOfClass("TextLabel")
+                            if tx and tx.Text and tx.Text~="" then cachedMoveNames[sl]=tx.Text:lower() end
                         end
-                        cachedBtns.moveN[slot] = cachedMoveNames[slot]
-                        result.moveNames[slot] = cachedMoveNames[slot]
+                        BtnCache.moveN[sl]=cachedMoveNames[sl]; res.moveNames[sl]=cachedMoveNames[sl]
                     end
-                elseif pn ~= "SoulMove" then
-                    if not cachedBtns.fight then cachedBtns.fight = desc end
-                    local anc = desc.Parent
-                    local av = true
-                    while anc and anc ~= battleGui do
-                        if anc:IsA("GuiObject") and not anc.Visible then av = false; break end
-                        anc = anc.Parent
-                    end
-                    if av and not result.fightButton then result.fightButton = desc end
+                elseif pn~="SoulMove" then
+                    if not BtnCache.fight then BtnCache.fight=desc end
+                    local anc=desc.Parent; local av=true
+                    while anc and anc~=bg do if anc:IsA("GuiObject") and not anc.Visible then av=false break end; anc=anc.Parent end
+                    if av and not res.fightButton then res.fightButton=desc end
                 end
             end
-        end
-        btnsScanned = true
+        end; btnsScanned=true
     end)
-
-    return result
+    return res
 end
 
-local function clickButton(button)
+local function clickBtn(button)
     if not button then return false end
     if firesignal then
         pcall(function() firesignal(button.MouseButton1Click) end)
@@ -2541,507 +1483,330 @@ local function clickButton(button)
     end
     if fireclick then pcall(function() fireclick(button) end) end
     pcall(function()
-        local p, s = button.AbsolutePosition, button.AbsoluteSize
-        local cx, cy = p.X + s.X/2, p.Y + s.Y/2
-        VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, true, game, 1)
-        task.wait(0.03)
-        VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, false, game, 1)
+        local p,s=button.AbsolutePosition,button.AbsoluteSize
+        local cx,cy=p.X+s.X/2,p.Y+s.Y/2
+        Svc.VIM:SendMouseButtonEvent(cx,cy,0,true,game,1); task.wait(0.03)
+        Svc.VIM:SendMouseButtonEvent(cx,cy,0,false,game,1)
     end)
     pcall(function()
-        local inset = game:GetService("GuiService"):GetGuiInset()
-        local p, s = button.AbsolutePosition, button.AbsoluteSize
-        local cx, cy = p.X + s.X/2, p.Y + s.Y/2 + inset.Y
-        VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, true, game, 1)
-        task.wait(0.03)
-        VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, false, game, 1)
+        local ins=Svc.GUI:GetGuiInset()
+        local p,s=button.AbsolutePosition,button.AbsoluteSize
+        local cx,cy=p.X+s.X/2,p.Y+s.Y/2+ins.Y
+        Svc.VIM:SendMouseButtonEvent(cx,cy,0,true,game,1); task.wait(0.03)
+        Svc.VIM:SendMouseButtonEvent(cx,cy,0,false,game,1)
     end)
     return true
 end
 
--- Unified battle loop: handles both Wild and Trainer with their own mode/slot
-local function performAutoAction(battleType)
-    local effectiveMode, effectiveSlot
+local function performAuto(battleType)
+    local mode,slot
+    if battleType=="Wild" then
+        if not Auto.wildOn or Auto.wildMode=="off" then return end
+        mode=Auto.wildMode; slot=Auto.wildSlot
+    elseif battleType=="Trainer" then
+        if not Auto.trainerOn or Auto.trMode=="off" then return end
+        mode=Auto.trMode; slot=Auto.trSlot
+    else return end
 
-    if battleType == "Wild" then
-        if not automateWild or autoMode == "off" then return end
-        effectiveMode = autoMode
-        effectiveSlot = autoMoveSlot
-    elseif battleType == "Trainer" then
-        if not automateTrainer or trainerAutoMode == "off" then return end
-        effectiveMode = trainerAutoMode
-        effectiveSlot = trainerAutoMoveSlot
-    else
-        return
-    end
-
-    if rareFoundPause or pendingAutoAction then return end
-    pendingAutoAction = true
-
-    local modeLabel = battleType == "Wild" and "Wild" or "Trainer"
-    log("AUTO", "performAutoAction [" .. modeLabel .. "] mode=" .. effectiveMode)
+    if State.rareFoundPause or State.pendingAutoAction then return end
+    State.pendingAutoAction=true
+    local tag="["..battleType.."]"
 
     task.spawn(function()
-        local heartbeat = RunService.Heartbeat
-        local ui = nil
-        local pollStart = tick()
-        local maxWait = 30
-
-        while (tick() - pollStart) < maxWait do
-            if rareFoundPause then pendingAutoAction = false; return end
-            ui = findBattleUI()
+        local hb=Svc.Run.Heartbeat
+        local ui=nil; local ps=tick()
+        while (tick()-ps)<30 do
+            if State.rareFoundPause then State.pendingAutoAction=false; return end
+            ui=findUI()
             if ui then
-                if effectiveMode == "run" and ui.runButton then break end
+                if mode=="run" and ui.runButton then break end
                 if ui.runButton or ui.fightButton then break end
             end
-            heartbeat:Wait()
+            hb:Wait()
         end
-
         if not ui or (not ui.runButton and not ui.fightButton) then
-            log("AUTO", "[" .. modeLabel .. "] Battle UI not found after " .. maxWait .. "s")
-            addBattleLog("⚠ [" .. modeLabel .. "] UI timeout", C.Orange)
-            pendingAutoAction = false
-            return
+            addBattleLog("⚠ "..tag.." UI timeout",C.Trainer); State.pendingAutoAction=false; return
         end
 
-        if effectiveMode == "run" then
+        if mode=="run" then
             if ui.runButton then
-                log("AUTO", "[" .. modeLabel .. "] Auto-RUN")
-                addBattleLog("🤖 [" .. modeLabel .. "] RUN ▸ fleeing", C.Cyan)
-                for attempt = 1, 10 do
-                    local freshUI = findBattleUI()
-                    if not freshUI or not freshUI.runButton then break end
-                    clickButton(freshUI.runButton)
-                    task.wait(0.2)
+                addBattleLog("🤖 "..tag.." RUN",C.Cyan)
+                for _=1,10 do
+                    local fu=findUI(); if not fu or not fu.runButton then break end
+                    clickBtn(fu.runButton); task.wait(0.2)
                 end
-            else
-                addBattleLog("⚠ [" .. modeLabel .. "] Run button not found", C.Orange)
+            else addBattleLog("⚠ "..tag.." no Run btn",C.Trainer) end
+            State.pendingAutoAction=false; return
+        end
+
+        -- MOVE loop
+        local col=battleType=="Wild" and C.Green or C.Trainer
+        local turns=0
+        while turns<30 do
+            turns=turns+1
+            if State.rareFoundPause then break end
+            if battleType=="Wild" and Auto.wildMode~="move" then break end
+            if battleType=="Trainer" and Auto.trMode~="move" then break end
+
+            local tui=nil; local ts=tick()
+            while (tick()-ts)<10 do
+                if State.rareFoundPause then break end
+                tui=findUI(); if tui and (tui.fightButton or hasMove(tui)) then break end; hb:Wait()
             end
-            pendingAutoAction = false
-            return
-        elseif effectiveMode == "move" then
-            local turnCount = 0
-            local maxTurns = 30
+            if not tui or (not tui.fightButton and not hasMove(tui)) then tui={fightButton=nil,moveButtons={},moveNames={}} end
 
-            while turnCount < maxTurns do
-                turnCount = turnCount + 1
-                if rareFoundPause or (battleType == "Wild" and autoMode ~= "move") or (battleType == "Trainer" and trainerAutoMode ~= "move") then break end
-
-                local turnUI = nil
-                local turnStart = tick()
-                while (tick() - turnStart) < 10 do
-                    if rareFoundPause then break end
-                    turnUI = findBattleUI()
-                    if turnUI and (turnUI.fightButton or hasAnyMove(turnUI)) then break end
-                    heartbeat:Wait()
+            local clicked=false
+            if tui.fightButton and not hasMove(tui) then
+                if turns==1 then addBattleLog("🤖 "..tag.." FIGHT...",col) end
+                clickBtn(tui.fightButton); clicked=true
+                local ms=tick(); local lr=ms
+                while (tick()-ms)<3 do
+                    hb:Wait(); local mu=findUI()
+                    if mu and hasMove(mu) then tui=mu break end
+                    if (tick()-lr)>=0.3 then lr=tick(); local ru=findUI(); if ru and ru.fightButton and not hasMove(ru) then clickBtn(ru.fightButton) end end
                 end
-
-                if not turnUI or (not turnUI.fightButton and not hasAnyMove(turnUI)) then
-                    turnUI = { fightButton = nil, moveButtons = {}, moveNames = {} }
-                end
-
-                local clickedSomething = false
-
-                if turnUI.fightButton and not hasAnyMove(turnUI) then
-                    if turnCount == 1 then
-                        addBattleLog("🤖 [" .. modeLabel .. "] MOVE ▸ fighting...", battleType == "Wild" and C.Green or C.Orange)
-                    end
-                    clickButton(turnUI.fightButton)
-                    clickedSomething = true
-
-                    local moveUI = nil
-                    local moveStart = tick()
-                    local lastRetry = moveStart
-                    while (tick() - moveStart) < 3 do
-                        heartbeat:Wait()
-                        moveUI = findBattleUI()
-                        if moveUI and hasAnyMove(moveUI) then break end
-                        if (tick() - lastRetry) >= 0.3 then
-                            lastRetry = tick()
-                            local retryUI = findBattleUI()
-                            if retryUI and retryUI.fightButton and not hasAnyMove(retryUI) then
-                                clickButton(retryUI.fightButton)
-                            end
-                        end
-                    end
-
-                    if moveUI and hasAnyMove(moveUI) then
-                        local targetSlot = math.clamp(effectiveSlot, 1, 4)
-                        if moveUI.moveButtons[targetSlot] then
-                            log("AUTO", "[" .. modeLabel .. "] turn " .. turnCount .. " Move" .. targetSlot)
-                            addBattleLog("🤖 T" .. turnCount .. " [" .. modeLabel .. "] ▸ Move " .. targetSlot, battleType == "Wild" and C.Green or C.Orange)
-                            clickButton(moveUI.moveButtons[targetSlot])
-                        else
-                            for s = 1, 4 do
-                                if moveUI.moveButtons[s] then
-                                    addBattleLog("🤖 T" .. turnCount .. " [" .. modeLabel .. "] ▸ Move " .. s .. " (fb)", C.Orange)
-                                    clickButton(moveUI.moveButtons[s])
-                                    break
-                                end
-                            end
-                        end
+                if hasMove(tui) then
+                    local sl=math.clamp(slot,1,4)
+                    if tui.moveButtons[sl] then
+                        addBattleLog("🤖 T"..turns.." "..tag.." M"..sl,col); clickBtn(tui.moveButtons[sl])
                     else
-                        addBattleLog("⚠ No move buttons T" .. turnCount, C.Orange)
-                    end
-                elseif hasAnyMove(turnUI) then
-                    clickedSomething = true
-                    local targetSlot = math.clamp(effectiveSlot, 1, 4)
-                    if turnUI.moveButtons[targetSlot] then
-                        clickButton(turnUI.moveButtons[targetSlot])
-                        addBattleLog("🤖 T" .. turnCount .. " [" .. modeLabel .. "] ▸ Move " .. targetSlot, battleType == "Wild" and C.Green or C.Orange)
-                    else
-                        for s = 1, 4 do
-                            if turnUI.moveButtons[s] then
-                                clickButton(turnUI.moveButtons[s])
-                                addBattleLog("🤖 T" .. turnCount .. " ▸ Move " .. s .. " (fb)", C.Orange)
-                                break
-                            end
-                        end
+                        for s2=1,4 do if tui.moveButtons[s2] then addBattleLog("🤖 T"..turns.." M"..s2.."(fb)",col); clickBtn(tui.moveButtons[s2]); break end end
                     end
                 end
+            elseif hasMove(tui) then
+                clicked=true
+                local sl=math.clamp(slot,1,4)
+                if tui.moveButtons[sl] then clickBtn(tui.moveButtons[sl]); addBattleLog("🤖 T"..turns.." "..tag.." M"..sl,col)
+                else for s2=1,4 do if tui.moveButtons[s2] then clickBtn(tui.moveButtons[s2]); break end end end
+            end
 
-                if clickedSomething then
-                    local vanishStart = tick()
-                    local lastMoveRetry = vanishStart
-                    while (tick() - vanishStart) < 2 do
-                        local vUI = findBattleUI()
-                        if not vUI or not hasAnyMove(vUI) then break end
-                        if (tick() - lastMoveRetry) >= 0.3 and vUI then
-                            lastMoveRetry = tick()
-                            local retrySlot = math.clamp(effectiveSlot, 1, 4)
-                            if vUI.moveButtons[retrySlot] then
-                                clickButton(vUI.moveButtons[retrySlot])
-                            else
-                                for s = 1, 4 do if vUI.moveButtons[s] then clickButton(vUI.moveButtons[s]); break end end
-                            end
-                        end
-                        heartbeat:Wait()
+            if clicked then
+                local vs=tick(); local lr2=vs
+                while (tick()-vs)<2 do
+                    local vu=findUI(); if not vu or not hasMove(vu) then break end
+                    if (tick()-lr2)>=0.3 then lr2=tick()
+                        local ru=findUI(); local sl2=math.clamp(slot,1,4)
+                        if ru then (ru.moveButtons[sl2] and clickBtn(ru.moveButtons[sl2])) or (function() for s2=1,4 do if ru.moveButtons[s2] then clickBtn(ru.moveButtons[s2]); break end end end)() end
                     end
-
-                    local waitStart = tick()
-                    while (tick() - waitStart) < 30 do
-                        if rareFoundPause then break end
-                        local checkUI = findBattleUI()
-                        if checkUI and (checkUI.fightButton or hasAnyMove(checkUI)) then break end
-                        if not checkUI and (tick() - waitStart) > 5 then
-                            if player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
-                                log("AUTO", "[" .. modeLabel .. "] battle ended (no UI for 5s)")
-                                addBattleLog("🤖 [" .. modeLabel .. "] done (" .. turnCount .. " turns)", battleType == "Wild" and C.Green or C.Orange)
-                                break
-                            end
-                        end
-                        heartbeat:Wait()
-                    end
-
-                    local finalCheck = findBattleUI()
-                    if not finalCheck then
-                        log("AUTO", "[" .. modeLabel .. "] ended after " .. turnCount .. " turns")
-                        addBattleLog("🤖 [" .. modeLabel .. "] done (" .. turnCount .. " turns)", battleType == "Wild" and C.Green or C.Orange)
-                        break
-                    end
+                    hb:Wait()
                 end
+                local ws=tick()
+                while (tick()-ws)<30 do
+                    if State.rareFoundPause then break end
+                    local cu=findUI()
+                    if cu and (cu.fightButton or hasMove(cu)) then break end
+                    if not cu and (tick()-ws)>5 then
+                        if player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+                            addBattleLog("🤖 "..tag.." done("..turns.."t)",col); break
+                        end
+                    end
+                    hb:Wait()
+                end
+                if not findUI() then addBattleLog("🤖 "..tag.." done("..turns.."t)",col); break end
             end
         end
 
         task.wait(1)
-        if battleState == "active" then
-            battleState = "idle"
-            stateVal.Text = "Idle"
-            stateVal.TextColor3 = C.TextDim
-        end
-        pendingAutoAction = false
+        if State.battleState=="active" then State.battleState="idle"; UI.stateVal.Text="Idle"; UI.stateVal.TextColor3=C.Dim end
+        State.pendingAutoAction=false
     end)
 end
 
 --==================================================
 -- BATTLE PROCESSING
 --==================================================
-local function extractNameAndSide(cmdEntry)
-    local cmd = cmdEntry[1]
-    if type(cmd) ~= "string" then return nil end
-    local cmdL = string.lower(cmd)
-    if cmdL ~= "owm" and cmdL ~= "switch" then return nil end
-
-    local rawName, side, infoStr = nil, nil, nil
-
-    for i = 2, math.min(#cmdEntry, 8) do
-        local v = cmdEntry[i]
-        if type(v) == "string" then
-            if (v == "p1" or v == "p2") and not side then
-                side = v
-            elseif string.find(v, ":%s*.+") then
-                local n = v:match(":%s*(.+)$")
-                if n then rawName = n end
-                if string.find(v, "p1") then side = side or "p1"
-                elseif string.find(v, "p2") then side = side or "p2" end
-            elseif string.find(v, ", L%d+") then
-                infoStr = v
-                if not rawName then rawName = v:match("^([^,]+)") end
+local function extractSide(entry)
+    local cmd=entry[1]; if type(cmd)~="string" then return nil end
+    local cmdL=cmd:lower(); if cmdL~="owm" and cmdL~="switch" then return nil end
+    local rawName,side,infoStr
+    for i=2,math.min(#entry,8) do
+        local v=entry[i]
+        if type(v)=="string" then
+            if (v=="p1" or v=="p2") and not side then side=v
+            elseif v:find(":%s*.+") then
+                local n=v:match(":%s*(.+)$"); if n then rawName=n end
+                if v:find("p1") then side=side or "p1" elseif v:find("p2") then side=side or "p2" end
+            elseif v:find(", L%d+") then
+                infoStr=v; if not rawName then rawName=v:match("^([^,]+)") end
             end
-        elseif type(v) == "table" and not rawName then
-            if type(v.name) == "string" then rawName = v.name end
+        elseif type(v)=="table" and not rawName then
+            if type(v.name)=="string" then rawName=v.name end
         end
     end
-
-    if rawName then
-        return rawName, side, infoStr, extractLoomianName(rawName)
-    end
-    return nil
+    if rawName then return rawName,side,infoStr,nameFormat(rawName) end
 end
 
-local KNOWN_COMMANDS = {
-    player = true, owm = true, switch = true, start = true,
-    move = true, damage = true, ["-damage"] = true,
-    turn = true, faint = true, ["end"] = true,
-}
+local KNOWN_CMD={player=true,owm=true,switch=true,start=true,move=true,
+    damage=true,["-damage"]=true,turn=true,faint=true,["end"]=true}
 
-local function processBattleCommands(commandTable)
-    log("BATTLE", "========== PROCESSING " .. tostring(#commandTable) .. " COMMANDS ==========")
-    addBattleLog(">>> " .. tostring(#commandTable) .. " battle cmds <<<", C.Green)
-
-    for _, entry in pairs(commandTable) do
-        if type(entry) == "table" and type(entry[1]) == "string" and string.lower(entry[1]) == "start" then
-            log("BATTLE", "  NEW BATTLE (start found)")
-            resetBattle()
-            currentBattle.active = true
-            btnsScanned = false  -- reset button cache for new battle
-            break
+local function processBattle(cmds)
+    addBattleLog(">>> "..tostring(#cmds).." cmds <<<",C.Green)
+    for _,e in pairs(cmds) do
+        if type(e)=="table" and type(e[1])=="string" and e[1]:lower()=="start" then
+            resetBattle(); Battle.active=true; btnsScanned=false; break
         end
     end
-
-    for _, entry in pairs(commandTable) do
-        if type(entry) == "table" and type(entry[1]) == "string" and string.lower(entry[1]) == "player" then
-            local side = entry[2]
-            local tag = entry[3]
-            log("BATTLE", "  player cmd: side=" .. tostring(side) .. " tag=" .. tostring(tag))
-            if type(tag) == "string" then
-                if string.find(tag, "#Wild") then
-                    currentBattle.battleType = "Wild"
-                elseif side == "p2" then
-                    currentBattle.battleType = "Trainer"
-                end
+    for _,e in pairs(cmds) do
+        if type(e)=="table" and type(e[1])=="string" and e[1]:lower()=="player" then
+            local side,tag=e[2],e[3]
+            if type(tag)=="string" then
+                if tag:find("#Wild") then Battle.battleType="Wild"
+                elseif side=="p2" then Battle.battleType="Trainer" end
             end
         end
     end
-
-    for _, entry in pairs(commandTable) do
-        if type(entry) == "table" and type(entry[1]) == "string" then
-            local cmdL = string.lower(entry[1])
-            if cmdL == "owm" or cmdL == "switch" then
-                local rawName, side, infoStr, displayName = extractNameAndSide(entry)
-                if rawName then
-                    local stats = parseLoomianStats(infoStr)
-                    log("BATTLE", "  " .. entry[1] .. ": name=" .. displayName .. " side=" .. tostring(side))
-                    if side == "p2" then
-                        currentBattle.enemy = displayName
-                        currentBattle.enemyStats = stats
-                        currentBattle.enemyRawEntry = entry
-                    elseif side == "p1" then
-                        currentBattle.player = displayName
-                        currentBattle.playerStats = stats
+    for _,e in pairs(cmds) do
+        if type(e)=="table" and type(e[1])=="string" then
+            local cmdL=e[1]:lower()
+            if cmdL=="owm" or cmdL=="switch" then
+                local rawN,side,info,dispN=extractSide(e)
+                if rawN then
+                    local stats=parseStats(info)
+                    if side=="p2" then Battle.enemy=dispN; Battle.enemyStats=stats; Battle.enemyRawEntry=e
+                    elseif side=="p1" then Battle.player=dispN; Battle.playerStats=stats
                     else
-                        if not currentBattle.enemy then
-                            currentBattle.enemy = displayName
-                            currentBattle.enemyStats = stats
-                            currentBattle.enemyRawEntry = entry
-                        elseif not currentBattle.player then
-                            currentBattle.player = displayName
-                            currentBattle.playerStats = stats
-                        end
+                        if not Battle.enemy then Battle.enemy=dispN; Battle.enemyStats=stats; Battle.enemyRawEntry=e
+                        elseif not Battle.player then Battle.player=dispN; Battle.playerStats=stats end
                     end
                 end
             end
         end
     end
-
-    if not currentBattle.enemy then
-        for _, entry in pairs(commandTable) do
-            if type(entry) == "table" and type(entry[1]) == "string" then
-                local cmdL = string.lower(entry[1])
-                if cmdL == "move" or cmdL == "damage" or cmdL == "-damage" then
-                    for i = 2, #entry do
-                        if type(entry[i]) == "string" then
-                            local pNum, name = entry[i]:match("p(%d+)%a*:%s*(.+)$")
-                            if pNum == "2" and name then
-                                currentBattle.enemy = extractLoomianName(name)
-                                break
-                            end
+    if not Battle.enemy then
+        for _,e in pairs(cmds) do
+            if type(e)=="table" and type(e[1])=="string" then
+                local cl=e[1]:lower()
+                if cl=="move" or cl=="damage" or cl=="-damage" then
+                    for i=2,#e do
+                        if type(e[i])=="string" then
+                            local pn,n=e[i]:match("p(%d+)%a*:%s*(.+)$")
+                            if pn=="2" and n then Battle.enemy=nameFormat(n); break end
                         end
                     end
-                    if currentBattle.enemy then break end
+                    if Battle.enemy then break end
+                end
+            end
+        end
+    end
+    for _,e in pairs(cmds) do
+        if type(e)=="table" and type(e[1])=="string" then
+            local cl=e[1]:lower()
+            if cl=="faint" then
+                if type(e[2])=="string" and e[2]:find("p2") then
+                    State.sessionKOs=State.sessionKOs+1
+                    UI.sessionLbl.Text=("Session: %d KOs | %.1fk Dmg"):format(State.sessionKOs,State.sessionDamage/1000)
+                end
+            elseif cl=="-damage" or cl=="damage" then
+                if type(e[2])=="string" and e[2]:find("p2") then
+                    State.sessionDamage=State.sessionDamage+100
+                    UI.sessionLbl.Text=("Session: %d KOs | %.1fk Dmg"):format(State.sessionKOs,State.sessionDamage/1000)
                 end
             end
         end
     end
 
-    -- Mastery tracking
-    for _, entry in pairs(commandTable) do
-        if type(entry) == "table" and type(entry[1]) == "string" then
-            local cmdL = string.lower(entry[1])
-            if cmdL == "faint" then
-                if type(entry[2]) == "string" and string.find(entry[2], "p2") then
-                    sessionKOs = sessionKOs + 1
-                    sessionLbl.Text = string.format("Session: %d KOs | %.1fk Damage", sessionKOs, sessionDamage / 1000)
-                end
-            elseif cmdL == "-damage" or cmdL == "damage" then
-                if type(entry[2]) == "string" and string.find(entry[2], "p2") then
-                    sessionDamage = sessionDamage + 100
-                    sessionLbl.Text = string.format("Session: %d KOs | %.1fk Damage", sessionKOs, sessionDamage / 1000)
-                end
-            end
-        end
-    end
+    State.battleState="active"; State.lastBattleTick=tick(); Battle.active=true
+    UI.stateVal.Text="In Battle"; UI.stateVal.TextColor3=C.Green
 
-    battleState = "active"
-    lastBattleTick = tick()
-    currentBattle.active = true
-    stateVal.Text = "In Battle"
-    stateVal.TextColor3 = C.Green
+    if Battle.battleType=="Wild" then UI.typeVal.Text="Wild"; UI.typeVal.TextColor3=C.Wild
+    elseif Battle.battleType=="Trainer" then UI.typeVal.Text="Trainer"; UI.typeVal.TextColor3=C.Trainer end
 
-    local enemyName = currentBattle.enemy or "Unknown"
-    local playerName = currentBattle.player or "Unknown"
-    log("BATTLE", "RESULT: Enemy=" .. enemyName .. " Player=" .. playerName .. " Type=" .. currentBattle.battleType)
+    local eN=Battle.enemy or "Unknown"
+    local pN=Battle.player or "Unknown"
 
-    if currentBattle.battleType == "Wild" then
-        typeVal.Text = "Wild"; typeVal.TextColor3 = C.Wild
-    elseif currentBattle.battleType == "Trainer" then
-        typeVal.Text = "Trainer"; typeVal.TextColor3 = C.Trainer
-    end
+    if eN~="Unknown" and not Battle.enemyProcessed then
+        Battle.enemyProcessed=true; cachedMoveNames={}
 
-    if enemyName ~= "Unknown" and not currentBattle.enemyProcessed then
-        currentBattle.enemyProcessed = true
-        cachedMoveNames = {}
-
-        if currentBattle.battleType == "Wild" then
-            encounterCount = encounterCount + 1
-            encounterVal.Text = tostring(encounterCount)
-            table.insert(encounterHistory, 1, { name = enemyName, time = os.date("%X") })
-            if #encounterHistory > 10 then table.remove(encounterHistory, 11) end
+        if Battle.battleType=="Wild" then
+            State.encounterCount=State.encounterCount+1
+            UI.encVal.Text=tostring(State.encounterCount)
+            table.insert(State.encounterHistory,1,{name=eN,time=os.date("%X")})
+            if #State.encounterHistory>10 then table.remove(State.encounterHistory,11) end
         end
 
-        -- Multi-layer rare check
-        local rareFound = isRareLoomian(enemyName) or isRareModifier(enemyName)
-        if not rareFound and currentBattle.enemyRawEntry then
-            rareFound = scanEntryForRare(currentBattle.enemyRawEntry)
-            if rareFound then log("RARE", "!!! DEEP SCAN caught rare in model/disc data !!!") end
+        local rare=isRareLoomian(eN) or isRareMod(eN)
+        if not rare and Battle.enemyRawEntry then
+            rare=scanEntryRare(Battle.enemyRawEntry)
+            if rare then log("RARE","Deep scan caught rare!") end
         end
 
-        if rareFound then
-            enemyLbl.Text = 'Enemy: <font color="#FFD700">⭐ ' .. enemyName .. ' (RARE!)</font>'
-            addBattleLog("⭐ RARE: " .. enemyName, C.Gold)
-            rareFoundPause = true
-            updateAutoUI()
-            if currentEnemy ~= enemyName then
-                currentEnemy = enemyName
-                raresFoundCount = raresFoundCount + 1
-                playRareSound()
-                sendNotification("⭐ LumiWare", "RARE: " .. enemyName .. "! Automation PAUSED.", 10)
-                addRareLog(enemyName, currentBattle.enemyStats and ("Lv." .. tostring(currentBattle.enemyStats.level)) or nil)
-                sendRareWebhook(enemyName, currentBattle.enemyStats and currentBattle.enemyStats.level,
-                    currentBattle.enemyStats and currentBattle.enemyStats.gender or "?",
-                    encounterCount, formatTime(tick() - huntStartTime))
+        if rare then
+            UI.enemyLbl.Text='Enemy: <font color="#FFD700">⭐ '..eN..' (RARE!)</font>'
+            addBattleLog("⭐ RARE: "..eN,C.Gold)
+            State.rareFoundPause=true; updateAutoUI()
+            if State.currentEnemy~=eN then
+                State.currentEnemy=eN; State.raresFound=State.raresFound+1
+                playRare(); notify("⭐ LumiWare","RARE: "..eN.."! Auto PAUSED.",10)
+                addRareLog(eN,Battle.enemyStats and ("Lv."..tostring(Battle.enemyStats.level)) or nil)
+                webhookRare(eN,Battle.enemyStats and Battle.enemyStats.level,
+                    Battle.enemyStats and Battle.enemyStats.gender or "?",
+                    State.encounterCount,fmtTime(tick()-State.huntStart))
             end
         else
-            enemyLbl.Text = "Enemy: " .. enemyName
-            addBattleLog(currentBattle.battleType .. ": " .. enemyName, C.TextDim)
-            currentEnemy = nil
-            -- Trigger appropriate automation
-            if not rareFoundPause then
-                performAutoAction(currentBattle.battleType)
-            end
+            UI.enemyLbl.Text="Enemy: "..eN
+            addBattleLog(Battle.battleType..": "..eN,C.Dim)
+            State.currentEnemy=nil
+            if not State.rareFoundPause then performAuto(Battle.battleType) end
         end
     end
 
-    if currentBattle.enemyStats then
-        local s = currentBattle.enemyStats
-        local g = s.gender == "M" and "♂" or (s.gender == "F" and "♀" or "?")
-        enemyStatsLbl.Text = string.format("Lv.%d  %s  HP %d/%d", s.level or 0, g, s.hp or 0, s.maxHP or 0)
+    if Battle.enemyStats then
+        local s=Battle.enemyStats
+        local g=s.gender=="M" and "♂" or (s.gender=="F" and "♀" or "?")
+        UI.enemyStatsLbl.Text=("Lv.%d  %s  HP %d/%d"):format(s.level or 0,g,s.hp or 0,s.maxHP or 0)
     end
-
-    if playerName ~= "Unknown" then
-        playerLbl.Text = "Your Loomian: " .. playerName
-        if currentBattle.playerStats then
-            local s = currentBattle.playerStats
-            local g = s.gender == "M" and "♂" or (s.gender == "F" and "♀" or "?")
-            playerLbl.Text = playerLbl.Text .. string.format("  (Lv.%d %s HP %d/%d)", s.level or 0, g, s.hp or 0, s.maxHP or 0)
+    if pN~="Unknown" then
+        UI.playerLbl.Text="Your Loomian: "..pN
+        if Battle.playerStats then
+            local s=Battle.playerStats
+            local g=s.gender=="M" and "♂" or (s.gender=="F" and "♀" or "?")
+            UI.playerLbl.Text=UI.playerLbl.Text..(" (Lv.%d %s HP %d/%d)"):format(s.level or 0,g,s.hp or 0,s.maxHP or 0)
         end
     end
-
-    log("BATTLE", "========== DONE ==========")
 end
 
 --==================================================
 -- HOOK REMOTES
 --==================================================
-local hooked = {}
-local hookedCount = 0
+local hooked={}; local hookedCount=0
 
 local function hookEvent(remote)
-    if hooked[remote] then return end
-    hooked[remote] = true
-    hookedCount = hookedCount + 1
-
+    if hooked[remote] then return end; hooked[remote]=true; hookedCount=hookedCount+1
     track(remote.OnClientEvent:Connect(function(...)
-        local argCount = select("#", ...)
-        local allArgs = {}
-        for i = 1, argCount do allArgs[i] = select(i, ...) end
-        allArgs.n = argCount
+        local ac=select("#",...)
+        local args={}; for i=1,ac do args[i]=select(i,...) end; args.n=ac
 
-        if discoveryMode then
-            local parts = {}
-            for i = 1, argCount do
-                local a = allArgs[i]
-                local info = "arg" .. i .. "=" .. type(a)
-                if type(a) == "string" then info = info .. '("' .. string.sub(a, 1, 20) .. '")'
-                elseif type(a) == "table" then
-                    local c = 0
-                    for _ in pairs(a) do c = c + 1 end
-                    info = info .. "(n=" .. c .. ")"
-                end
-                table.insert(parts, info)
+        if State.discoveryMode then
+            local parts={}
+            for i=1,ac do
+                local a=args[i]; local info="arg"..i.."="..type(a)
+                if type(a)=="string" then info=info..'("'..a:sub(1,20)..'")'
+                elseif type(a)=="table" then local c=0; for _ in pairs(a) do c=c+1 end; info=info.."(n="..c..")" end
+                parts[#parts+1]=info
             end
-            addBattleLog("📡 " .. remote.Name .. " | " .. table.concat(parts, ", "), Color3.fromRGB(180, 180, 180))
-            if VERBOSE_MODE then
-                for i = 1, argCount do
-                    local a = allArgs[i]
-                    if type(a) == "table" then log("EVT", remote.Name, "arg" .. i .. ":", tablePreview(a)) end
-                end
-            end
+            addBattleLog("📡 "..remote.Name.." | "..table.concat(parts,", "),Color3.fromRGB(180,180,180))
         end
 
-        local isBattle = false
-        if type(allArgs[1]) == "string" then
-            if string.lower(allArgs[1]):find("battle") then isBattle = true end
-        end
+        local isBattle=type(args[1])=="string" and args[1]:lower():find("battle") and true or false
+        local cmdTable=nil
 
-        local cmdTable = nil
-        for i = 1, argCount do
-            local arg = allArgs[i]
-            if type(arg) == "table" then
-                for k, v in pairs(arg) do
-                    if type(v) == "table" then
-                        local first = v[1]
-                        if type(first) == "string" and KNOWN_COMMANDS[string.lower(first)] then
-                            cmdTable = arg; break
-                        end
-                    elseif type(v) == "string" and string.sub(v, 1, 1) == "[" then
-                        local ok2, decoded = pcall(function() return HttpService:JSONDecode(v) end)
-                        if ok2 and type(decoded) == "table" and type(decoded[1]) == "string" then
-                            local cmd = string.lower(decoded[1])
-                            if KNOWN_COMMANDS[cmd] then
-                                local decodedTable = {}
-                                for key, val in pairs(arg) do
-                                    if type(val) == "string" and string.sub(val, 1, 1) == "[" then
-                                        local ok3, dec3 = pcall(function() return HttpService:JSONDecode(val) end)
-                                        decodedTable[key] = (ok3 and type(dec3) == "table") and dec3 or val
-                                    elseif type(val) == "string" and string.sub(val, 1, 1) == "{" then
-                                        local ok3, dec3 = pcall(function() return HttpService:JSONDecode(val) end)
-                                        decodedTable[key] = (ok3 and type(dec3) == "table") and dec3 or val
-                                    else
-                                        decodedTable[key] = val
-                                    end
-                                end
-                                cmdTable = decodedTable; break
+        for i=1,ac do
+            local arg=args[i]
+            if type(arg)=="table" then
+                for k,v in pairs(arg) do
+                    if type(v)=="table" then
+                        local f=v[1]; if type(f)=="string" and KNOWN_CMD[f:lower()] then cmdTable=arg; break end
+                    elseif type(v)=="string" and v:sub(1,1)=="[" then
+                        local ok,dec=pcall(function() return Svc.Http:JSONDecode(v) end)
+                        if ok and type(dec)=="table" and type(dec[1])=="string" and KNOWN_CMD[dec[1]:lower()] then
+                            local dt={}
+                            for k2,v2 in pairs(arg) do
+                                if type(v2)=="string" and (v2:sub(1,1)=="[" or v2:sub(1,1)=="{") then
+                                    local ok2,d2=pcall(function() return Svc.Http:JSONDecode(v2) end)
+                                    dt[k2]=(ok2 and type(d2)=="table") and d2 or v2
+                                else dt[k2]=v2 end
                             end
+                            cmdTable=dt; break
                         end
                     end
                 end
@@ -3049,97 +1814,86 @@ local function hookEvent(remote)
             end
         end
 
-        if cmdTable then
-            processBattleCommands(cmdTable)
-        elseif isBattle then
-            logDebug("BattleEvent no cmd table, arg3=" .. tostring(allArgs[3]))
-        end
+        if cmdTable then processBattle(cmdTable) elseif isBattle then logD("BattleEvent no cmdTable") end
     end))
 end
 
-log("HOOK", "Scanning...")
-local c = 0
-for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do
-    if obj:IsA("RemoteEvent") then hookEvent(obj); c = c + 1 end
+log("HOOK","Scanning...")
+local c2=0
+for _,obj in ipairs(Svc.RS:GetDescendants()) do if obj:IsA("RemoteEvent") then hookEvent(obj); c2=c2+1 end end
+track(Svc.RS.DescendantAdded:Connect(function(obj) if obj:IsA("RemoteEvent") then hookEvent(obj) end end))
+pcall(function() for _,obj in ipairs(workspace:GetDescendants()) do if obj:IsA("RemoteEvent") then hookEvent(obj) end end end)
+pcall(function() for _,obj in ipairs(player:WaitForChild("PlayerGui"):GetDescendants()) do if obj:IsA("RemoteEvent") then hookEvent(obj) end end end)
+log("HOOK","Hooked "..c2)
+
+--==================================================
+-- THREADS
+--==================================================
+local function spawnThread(fn)
+    local t=task.spawn(fn)
+    if _G.LumiWare_Threads then _G.LumiWare_Threads[#_G.LumiWare_Threads+1]=t end
+    return t
 end
-log("HOOK", "Hooked", c, "from ReplicatedStorage")
 
-track(ReplicatedStorage.DescendantAdded:Connect(function(obj)
-    if obj:IsA("RemoteEvent") then hookEvent(obj) end
-end))
-
-pcall(function()
-    for _, obj in ipairs(game:GetService("Workspace"):GetDescendants()) do
-        if obj:IsA("RemoteEvent") then hookEvent(obj) end
-    end
-end)
-pcall(function()
-    for _, obj in ipairs(player:WaitForChild("PlayerGui"):GetDescendants()) do
-        if obj:IsA("RemoteEvent") then hookEvent(obj) end
-    end
-end)
-
---==================================================
--- TIMER + SESSION THREADS
---==================================================
-local timerThread = task.spawn(function()
+spawnThread(function()
     while not _G.LumiWare_StopFlag do
         if not gui.Parent then break end
-        local elapsed = tick() - huntStartTime
-        timerVal.Text = formatTime(elapsed)
-        local minutes = elapsed / 60
-        if minutes > 0 then epmVal.Text = string.format("%.1f", encounterCount / minutes) end
-        if battleState == "active" and (tick() - lastBattleTick) > 8 then
-            battleState = "idle"
-            stateVal.Text = "Idle"
-            stateVal.TextColor3 = C.TextDim
-            if rareFoundPause then
-                rareFoundPause = false
-                updateAutoUI()
-                log("AUTO", "Battle ended: Rare pause lifted.")
-            end
+        local elapsed=tick()-State.huntStart
+        UI.timerVal.Text=fmtTime(elapsed)
+        local mins=elapsed/60
+        if mins>0 then UI.epmVal.Text=("%.1f"):format(State.encounterCount/mins) end
+        if State.battleState=="active" and (tick()-State.lastBattleTick)>8 then
+            State.battleState="idle"; UI.stateVal.Text="Idle"; UI.stateVal.TextColor3=C.Dim
+            if State.rareFoundPause then State.rareFoundPause=false; updateAutoUI(); log("AUTO","Rare pause lifted") end
         end
         task.wait(1)
     end
 end)
-if _G.LumiWare_Threads then table.insert(_G.LumiWare_Threads, timerThread) end
 
-local webhookThread = task.spawn(function()
-    local lastMs = 0
+spawnThread(function()
+    local last=0
     while not _G.LumiWare_StopFlag do
         if not gui.Parent then break end
-        if encounterCount > 0 and encounterCount % 50 == 0 and encounterCount ~= lastMs then
-            lastMs = encounterCount
-            sendSessionWebhook(encounterCount, formatTime(tick() - huntStartTime), raresFoundCount)
+        if State.encounterCount>0 and State.encounterCount%50==0 and State.encounterCount~=last then
+            last=State.encounterCount
+            webhookSession(State.encounterCount,fmtTime(tick()-State.huntStart),State.raresFound)
         end
         task.wait(5)
     end
 end)
-if _G.LumiWare_Threads then table.insert(_G.LumiWare_Threads, webhookThread) end
 
--- Try to find previously configured heal remote on startup
-if healRemoteName ~= "" then
-    task.spawn(function()
-        task.wait(3) -- Wait for remotes to be ready
-        local found = false
-        for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do
-            if (obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction")) and obj.Name == healRemoteName then
-                healRemote = obj
-                addHealLog("✅ Restored heal remote from config: " .. healRemoteName, C.Teal)
-                healSelectedName.Text = "Remote: " .. healRemoteName
-                healSelectedName.TextColor3 = C.Teal
-                healSelectedPath.Text = getFullPath(obj)
-                found = true
-                break
+spawnThread(function()
+    while not _G.LumiWare_StopFlag do
+        if not gui.Parent then break end
+        if Heal.enabled and Heal.remote and State.battleState~="active" then
+            if Battle.playerStats and Battle.playerStats.hp and Battle.playerStats.maxHP then
+                local pct=(Battle.playerStats.hp/Battle.playerStats.maxHP)*100
+                if pct<Heal.threshold and (tick()-Heal.lastTime)>Heal.cooldown then
+                    addHealLog(("⚠ HP %.0f%% — healing!"):format(pct),C.Trainer); performHeal()
+                end
             end
         end
-        if not found then
-            addHealLog("⚠ Saved heal remote not found: " .. healRemoteName, C.Orange)
+        task.wait(3)
+    end
+end)
+
+-- Restore saved heal remote
+if Heal.remoteName~="" then
+    spawnThread(function()
+        task.wait(3)
+        for _,obj in ipairs(Svc.RS:GetDescendants()) do
+            if (obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction")) and obj.Name==Heal.remoteName then
+                Heal.remote=obj
+                UI.healSelName.Text="Remote: "..Heal.remoteName; UI.healSelName.TextColor3=C.Teal
+                UI.healSelPath.Text=getPath(obj)
+                addHealLog("✅ Restored: "..Heal.remoteName,C.Teal); return
+            end
         end
+        addHealLog("⚠ Saved remote not found: "..Heal.remoteName,C.Trainer)
     end)
 end
 
-addBattleLog("Hooked " .. hookedCount .. " remotes — READY", C.Green)
-addBattleLog("v4.6: Trainer Auto + Auto-Heal + Config Tab", C.Accent)
-log("INFO", "LumiWare " .. VERSION .. " READY | Hooked " .. hookedCount .. " | Player: " .. PLAYER_NAME)
-sendNotification("⚡ LumiWare " .. VERSION, "Ready! Hooked " .. hookedCount .. " remotes.\nTrainer Auto + Auto-Heal active.", 6)
+addBattleLog("Hooked "..hookedCount.." remotes — READY",C.Green)
+addBattleLog(VERSION..": Trainer Auto | Auto-Heal | Config Tab",C.Accent)
+log("INFO","LumiWare "..VERSION.." READY | "..hookedCount.." remotes | "..PLAYER_NAME)
+notify("⚡ LumiWare "..VERSION,"Ready! "..hookedCount.." remotes hooked.\nTrainer Auto + Auto-Heal active.",6)
