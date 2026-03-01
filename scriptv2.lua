@@ -120,281 +120,282 @@ end
 log("INFO", "Initializing LumiWare " .. VERSION .. " for:", PLAYER_NAME)
 
 --------------------------------------------------
--- GAME API EXFILTRATION (v4.6 — Adaptive Discovery)
--- The game updates frequently, so we use multiple strategies
--- and a diagnostic mode to discover changed key names.
+-- GAME API EXFILTRATION (v5.0 — Hybrid Discovery)
+--
+-- The game no longer stores all modules in one shared table.
+-- Strategy:
+--   1. Try the ORIGINAL approach: find a table with "Utilities" key in getgc
+--   2. Try scoring approach with flexible key names
+--   3. If no shared table found: BUILD A SYNTHETIC gameAPI by finding
+--      individual modules through their method signatures
+--   4. Aggressive diagnostic dump if all else fails
 --------------------------------------------------
 local gameAPI = nil
 local gameAPIReady = false  -- true ONLY after all hooks are installed
 local setThreadContext = setthreadcontext or function(_) end
 
 -- ============================================================
--- DIAGNOSTIC: Dump all "interesting" tables from getgc to the
--- output/console so the user can report what keys exist now.
--- This only runs if the normal search fails after many attempts.
+-- MODULE SIGNATURES: Identify individual modules by their unique
+-- combinations of methods/properties, NOT by their parent table key.
+-- Each entry: { canonical name, { required keys }, { optional bonus keys } }
+-- A module must have ALL required keys to match.
 -- ============================================================
-local function dumpCandidateTables()
-    log("DIAG", "========== DUMPING CANDIDATE TABLES FROM getgc ==========")
-    local candidates = {}
-    pcall(function()
-        if not getgc then log("DIAG", "getgc not available"); return end
-        for _, obj in pairs(getgc(true)) do
-            if type(obj) == "table" then
-                -- Count how many string keys point to tables/functions
-                local strKeys = {}
-                local funcCount = 0
-                local tableCount = 0
-                local total = 0
-                pcall(function()
-                    for k, v in pairs(obj) do
-                        if type(k) == "string" then
-                            total = total + 1
-                            table.insert(strKeys, k)
-                            if type(v) == "function" then funcCount = funcCount + 1 end
-                            if type(v) == "table" then tableCount = tableCount + 1 end
-                        end
-                        if total > 50 then break end -- Don't scan huge tables
-                    end
-                end)
-                -- Only interested in tables with many sub-tables (like a module registry)
-                if tableCount >= 4 and total >= 6 then
-                    table.insert(candidates, {keys = strKeys, funcs = funcCount, tables = tableCount, ref = obj})
-                end
+local MODULE_SIGNATURES = {
+    {"Battle",     {"setupScene"},                                  {"doTrainerBattle", "doWildBattle", "currentBattle"}},
+    {"Network",    {"get"},                                         {"post", "fire", "set"}},
+    {"Menu",       {"disable", "enable"},                           {"pc", "shop", "rally", "mastery", "options", "fastClose", "enabled"}},
+    {"DataManager",{"loadChunk"},                                   {"loadModule", "currentChunk", "setLoading", "getModule"}},
+    {"BattleGui",  {"message"},                                     {"switchMonster", "animHit", "animMove", "animWeather", "animStatus", "animAbility", "animBoost", "setCameraIfLookingAway"}},
+    {"NPCChat",    {},                                              {"Say", "say", "manualAdvance"}}, -- at least 2 of optional
+    {"MasterControl", {"WalkEnabled"},                              {}},
+    {"Utilities",  {"FadeOut", "FadeIn"},                           {"TeleportToSpawnBox", "Teleport"}},
+    {"PlayerData", {"completedEvents"},                             {}},
+    {"Repel",      {"steps"},                                       {}},
+    {"Fishing",    {"OnWaterClicked"},                               {"rod", "FishMiniGame", "DisableRodModel"}},
+    {"WalkEvents", {"beginLoop"},                                   {}},
+    {"BattleClientSprite", {"animFaint", "animSummon"},             {"animUnsummon", "monsterIn", "monsterOut", "animEmulate"}},
+    {"BattleClientSide",   {"switchOut", "faint"},                  {"swapTo", "dragIn"}},
+    {"RoundedFrame",       {"setFillbarRatio"},                     {}},
+    {"ArcadeController",   {"playing"},                             {}},
+}
+
+-- Check if a table matches a module signature
+-- Returns: score (0 = no match, higher = better match)
+local function matchSignature(tbl, sig)
+    local name, required, optional = sig[1], sig[2], sig[3]
+    if type(tbl) ~= "table" then return 0 end
+
+    local ok, score = pcall(function()
+        local s = 0
+        -- ALL required keys must exist
+        for _, key in ipairs(required) do
+            local val = rawget(tbl, key)
+            if val == nil then return 0 end
+            s = s + 10
+        end
+        -- NPCChat special: needs at least 2 of Say/say/manualAdvance
+        if name == "NPCChat" then
+            local optCount = 0
+            for _, key in ipairs(optional) do
+                if rawget(tbl, key) ~= nil then optCount = optCount + 1 end
+            end
+            if optCount < 2 then return 0 end
+            s = s + optCount * 5
+        else
+            -- Bonus for optional keys
+            for _, key in ipairs(optional) do
+                if rawget(tbl, key) ~= nil then s = s + 5 end
             end
         end
+        return s
     end)
-    
-    log("DIAG", "Found " .. #candidates .. " candidate tables with 4+ sub-tables")
-    for i, c in ipairs(candidates) do
-        if i > 15 then log("DIAG", "... (" .. (#candidates - 15) .. " more)"); break end
-        -- Sort keys for readability
-        table.sort(c.keys)
-        local keyStr = table.concat(c.keys, ", ")
-        if #keyStr > 300 then keyStr = keyStr:sub(1, 300) .. "..." end
-        log("DIAG", string.format("  Table #%d: %d keys (%d funcs, %d tables): [%s]",
-            i, #c.keys, c.funcs, c.tables, keyStr))
-    end
-    
-    -- Also dump from debug.getregistry
-    pcall(function()
-        if not debug or not debug.getregistry then return end
-        local regCandidates = 0
-        for _, func in pairs(debug.getregistry()) do
-            if type(func) == "function" then
-                pcall(function()
-                    if not getupvalues then return end
-                    local upvals = getupvalues(func)
-                    if type(upvals) == "table" then
-                        for _, upv in pairs(upvals) do
-                            if type(upv) == "table" then
-                                local strKeys = {}
-                                local tableCount = 0
-                                for k, v in pairs(upv) do
-                                    if type(k) == "string" then
-                                        table.insert(strKeys, k)
-                                        if type(v) == "table" then tableCount = tableCount + 1 end
-                                    end
-                                    if #strKeys > 50 then break end
-                                end
-                                if tableCount >= 4 and #strKeys >= 6 then
-                                    regCandidates = regCandidates + 1
-                                    if regCandidates <= 10 then
-                                        table.sort(strKeys)
-                                        local ks = table.concat(strKeys, ", ")
-                                        if #ks > 300 then ks = ks:sub(1, 300) .. "..." end
-                                        log("DIAG", string.format("  Registry upvalue #%d: %d keys (%d tables): [%s]",
-                                            regCandidates, #strKeys, tableCount, ks))
-                                    end
-                                end
-                            end
-                        end
-                    end
-                end)
-            end
-        end
-        log("DIAG", "Registry scan found " .. regCandidates .. " candidate upvalue tables")
-    end)
-    
-    log("DIAG", "========== END DIAGNOSTIC DUMP ==========")
-    log("DIAG", "Please share the output above so LumiWare can be updated for the new game version.")
+    return (ok and score) or 0
 end
 
 -- ============================================================
--- FLEXIBLE MATCHING: Instead of requiring exact key names,
--- use a scoring system. The table with the highest score wins.
+-- STRATEGY 1: Original approach — look for shared table
 -- ============================================================
 local KNOWN_KEYS = {
-    -- High-confidence keys (score 10 each)
     Battle = 10, Network = 10, Utilities = 10, DataManager = 10,
     BattleGui = 10, NPCChat = 10, MasterControl = 10, Menu = 10,
-    
-    -- Medium-confidence keys (score 5 each)
     PlayerData = 5, Repel = 5, WalkEvents = 5, BattleClientSprite = 5,
     BattleClientSide = 5, Constants = 5, Assets = 5, Fishing = 5,
     ObjectiveManager = 5, RoundedFrame = 5, BitBuffer = 5,
-    
-    -- Low-confidence but helpful (score 3 each)
     Mining = 3, ArcadeController = 3,
+    -- lowercase/variant names
+    battle = 10, network = 10, utilities = 10, dataManager = 10,
+    battleGui = 10, npcChat = 10, masterControl = 10, menu = 10,
+    playerData = 5, repel = 5, walkEvents = 5, fishing = 5,
 }
 
--- Also try common variations (renamed keys in updates)
-local VARIANT_KEYS = {
-    -- Possible renames of "Battle"
-    battle = 10, BattleManager = 10, BattleSystem = 10, BattleModule = 10,
-    CombatManager = 10, Combat = 10,
-    -- Possible renames of "Network"
-    network = 10, NetworkManager = 10, Net = 10, RemoteManager = 10,
-    ServerAPI = 10, API = 8,
-    -- Possible renames of "Utilities"  
-    utilities = 10, Utils = 10, Util = 10, Helper = 8, Helpers = 8,
-    -- Possible renames of "DataManager"
-    dataManager = 10, Data = 8, DataModule = 8, GameData = 8,
-    -- Possible renames of "Menu"
-    menu = 10, MenuManager = 10, UI = 8, GuiManager = 8,
-    -- Possible renames of "MasterControl"
-    masterControl = 10, Controller = 8, PlayerController = 8,
-    InputManager = 8, MovementController = 8,
-    -- Possible renames of "PlayerData"
-    playerData = 5, Player = 5, LocalPlayerData = 5,
-    -- Possible renames of "Repel"
-    repel = 5, RepelSystem = 5,
-    -- Possible renames of "WalkEvents"
-    walkEvents = 5, Walk = 5, Movement = 5,
-    -- Possible renames of "NPCChat"
-    npcChat = 10, Chat = 8, Dialogue = 8, DialogueManager = 8,
-    -- Possible renames of "BattleGui"
-    battleGui = 10, BattleUI = 10, CombatUI = 10,
-}
-
-local function scoreTable(t)
+local function scoreTableAsShared(t)
     if type(t) ~= "table" then return 0 end
     local score = 0
-    local matchedKeys = {}
+    local matched = {}
     pcall(function()
         for k, _ in pairs(t) do
-            if type(k) == "string" then
-                if KNOWN_KEYS[k] then
-                    score = score + KNOWN_KEYS[k]
-                    table.insert(matchedKeys, k)
-                elseif VARIANT_KEYS[k] then
-                    score = score + VARIANT_KEYS[k]
-                    table.insert(matchedKeys, k .. "(variant)")
-                end
+            if type(k) == "string" and KNOWN_KEYS[k] then
+                score = score + KNOWN_KEYS[k]
+                table.insert(matched, k)
             end
         end
     end)
-    return score, matchedKeys
+    return score, matched
 end
 
-local MIN_SCORE_THRESHOLD = 15  -- Need at least 15 points to be considered
-
-local function initGameAPI()
-    local bestScore = 0
-    local bestTable = nil
-    local bestKeys = {}
+-- Gather all scannable tables from getgc + registry + getreg
+local function gatherAllTables()
+    local seen = {}
+    local allTables = {}
     
-    -- Strategy 1: getgc scan (most reliable)
+    local function addTable(t)
+        if type(t) ~= "table" or seen[t] then return end
+        seen[t] = true
+        table.insert(allTables, t)
+    end
+    
+    -- getgc(true) — all GC objects including tables
     pcall(function()
-        if not getgc then return end
-        for _, obj in pairs(getgc(true)) do
-            if type(obj) == "table" then
-                local score, keys = scoreTable(obj)
-                if score > bestScore then
-                    bestScore = score
-                    bestTable = obj
-                    bestKeys = keys
+        if getgc then
+            for _, obj in pairs(getgc(true)) do
+                addTable(obj)
+            end
+        end
+    end)
+    
+    -- debug.getregistry() — upvalues of registered functions
+    pcall(function()
+        if debug and debug.getregistry and getupvalues then
+            for _, v in pairs(debug.getregistry()) do
+                if type(v) == "function" then
+                    pcall(function()
+                        local ups = getupvalues(v)
+                        if type(ups) == "table" then
+                            for _, upv in pairs(ups) do
+                                addTable(upv)
+                            end
+                        end
+                    end)
+                elseif type(v) == "table" then
+                    addTable(v)
                 end
             end
         end
     end)
     
-    -- Strategy 2: debug.getregistry upvalue scan
+    -- getreg() (some executors)
     pcall(function()
-        if not debug or not debug.getregistry then return end
-        for _, func in pairs(debug.getregistry()) do
-            if type(func) == "function" then
+        if getreg then
+            for _, v in pairs(getreg()) do
+                addTable(v)
+            end
+        end
+    end)
+    
+    -- Also scan one level deep: sub-tables of found tables
+    -- (the module table might be a value inside another table)
+    local firstPass = {}
+    for _, t in ipairs(allTables) do table.insert(firstPass, t) end
+    for _, t in ipairs(firstPass) do
+        pcall(function()
+            for k, v in pairs(t) do
+                if type(v) == "table" and type(k) == "string" then
+                    addTable(v)
+                end
+            end
+        end)
+    end
+    
+    return allTables
+end
+
+-- ============================================================
+-- STRATEGY 2: Build synthetic gameAPI from individual modules
+-- ============================================================
+local function buildSyntheticAPI(allTables)
+    local synthetic = {}
+    local found = {}
+    
+    for _, sig in ipairs(MODULE_SIGNATURES) do
+        local moduleName = sig[1]
+        local bestScore = 0
+        local bestTable = nil
+        
+        for _, tbl in ipairs(allTables) do
+            -- Skip tables we've already assigned to another module
+            local alreadyUsed = false
+            for _, assigned in pairs(found) do
+                if assigned == tbl then alreadyUsed = true; break end
+            end
+            if not alreadyUsed then
+                local score = matchSignature(tbl, sig)
+                if score > bestScore then
+                    bestScore = score
+                    bestTable = tbl
+                end
+            end
+        end
+        
+        if bestTable and bestScore > 0 then
+            synthetic[moduleName] = bestTable
+            found[moduleName] = bestTable
+            log("API", "  Found module '" .. moduleName .. "' (score " .. bestScore .. ")")
+        end
+    end
+    
+    return synthetic, found
+end
+
+-- ============================================================
+-- STRATEGY 3: Require ReplicatedStorage modules
+-- ============================================================
+local function scanReplicatedStorage(allTables)
+    pcall(function()
+        local RS = game:GetService("ReplicatedStorage")
+        if not RS then return end
+        for _, child in pairs(RS:GetDescendants()) do
+            if child:IsA("ModuleScript") then
                 pcall(function()
-                    if not getupvalues then return end
-                    local upvals = getupvalues(func)
-                    if type(upvals) == "table" then
-                        for _, upv in pairs(upvals) do
-                            if type(upv) == "table" then
-                                local score, keys = scoreTable(upv)
-                                if score > bestScore then
-                                    bestScore = score
-                                    bestTable = upv
-                                    bestKeys = keys
-                                end
-                            end
-                        end
+                    local mod = require(child)
+                    if type(mod) == "table" then
+                        table.insert(allTables, mod)
                     end
                 end)
             end
         end
     end)
-    
-    -- Strategy 3: scan getreg if available
-    pcall(function()
-        if not getreg then return end
-        for _, v in pairs(getreg()) do
-            if type(v) == "table" then
-                local score, keys = scoreTable(v)
-                if score > bestScore then
-                    bestScore = score
-                    bestTable = v
-                    bestKeys = keys
-                end
-            end
-        end
-    end)
-    
-    -- Strategy 4: Try requiring known game modules from ReplicatedStorage
-    pcall(function()
-        local RS = game:GetService("ReplicatedStorage")
-        if not RS then return end
-        -- Try to find modules that might contain/reference the game API
-        local moduleNames = {"SharedModules", "Modules", "GameModules", "Common", "Shared", "Client"}
-        for _, name in ipairs(moduleNames) do
-            pcall(function()
-                local folder = RS:FindFirstChild(name, true)
-                if folder then
-                    for _, child in pairs(folder:GetDescendants()) do
-                        if child:IsA("ModuleScript") then
-                            pcall(function()
-                                local mod = require(child)
-                                if type(mod) == "table" then
-                                    local score, keys = scoreTable(mod)
-                                    if score > bestScore then
-                                        bestScore = score
-                                        bestTable = mod
-                                        bestKeys = keys
-                                    end
-                                end
-                            end)
-                        end
-                    end
-                end
-            end)
-        end
-    end)
-    
-    if bestScore >= MIN_SCORE_THRESHOLD then
-        gameAPI = bestTable
-        log("API", string.format("gameAPI found! Score: %d, Matched keys: [%s]",
-            bestScore, table.concat(bestKeys, ", ")))
-    end
 end
+
+-- ============================================================
+-- DIAGNOSTIC DUMP (much more aggressive — threshold of 1 table)
+-- ============================================================
+local function dumpCandidateTables(allTables)
+    log("DIAG", "========== DUMPING ALL INTERESTING TABLES ==========")
+    local candidates = {}
+    for _, obj in ipairs(allTables) do
+        pcall(function()
+            local strKeys = {}
+            local funcCount, tableCount = 0, 0
+            for k, v in pairs(obj) do
+                if type(k) == "string" then
+                    table.insert(strKeys, k)
+                    if type(v) == "function" then funcCount = funcCount + 1 end
+                    if type(v) == "table" then tableCount = tableCount + 1 end
+                end
+                if #strKeys > 30 then break end
+            end
+            -- Show ANY table with 2+ string keys (one of which is a table or function)
+            if #strKeys >= 2 and (funcCount >= 1 or tableCount >= 1) then
+                table.insert(candidates, {keys = strKeys, funcs = funcCount, tables = tableCount})
+            end
+        end)
+    end
+    
+    log("DIAG", "Found " .. #candidates .. " tables with 2+ string keys")
+    -- Sort by most sub-tables first
+    table.sort(candidates, function(a, b) return (a.tables + a.funcs) > (b.tables + b.funcs) end)
+    for i, c in ipairs(candidates) do
+        if i > 30 then log("DIAG", "... (" .. (#candidates - 30) .. " more)"); break end
+        table.sort(c.keys)
+        local keyStr = table.concat(c.keys, ", ")
+        if #keyStr > 350 then keyStr = keyStr:sub(1, 350) .. "..." end
+        log("DIAG", string.format("  #%d [%df %dt]: %s", i, c.funcs, c.tables, keyStr))
+    end
+    log("DIAG", "========== END DUMP ==========")
+    log("DIAG", "Please share the output above so LumiWare can be updated.")
+end
+
+-- ============================================================
+-- MAIN DISCOVERY LOOP
+-- ============================================================
 
 -- Helper: safely get a key from gameAPI, trying known names + variants
 local function apiGet(primaryKey, ...)
     if not gameAPI then return nil end
-    -- Try primary key first
     local val = rawget(gameAPI, primaryKey)
     if val then return val end
-    -- Try lowercase
     val = rawget(gameAPI, primaryKey:sub(1,1):lower() .. primaryKey:sub(2))
     if val then return val end
-    -- Try variants
     for _, variant in ipairs({...}) do
         val = rawget(gameAPI, variant)
         if val then return val end
@@ -402,63 +403,125 @@ local function apiGet(primaryKey, ...)
     return nil
 end
 
--- Log diagnostic info about what was found
-local function logGameAPIStatus()
-    if not gameAPI then
-        log("API", "gameAPI is NIL — none of the search strategies found it")
-        return
-    end
-    local found = {}
-    pcall(function()
-        for k, v in pairs(gameAPI) do
-            if type(k) == "string" then
-                local vtype = type(v)
-                table.insert(found, k .. "(" .. vtype .. ")")
-            end
-        end
-    end)
-    table.sort(found)
-    log("API", "gameAPI ALL keys: " .. table.concat(found, ", "))
-end
-
 task.spawn(function()
     local attempts = 0
+    local diagnosticDone = false
+    local rsScanned = false
+    
     while not gameAPI do
         attempts = attempts + 1
-        initGameAPI()
+        
+        -- Gather all scannable tables
+        local allTables = gatherAllTables()
+        
+        -- On attempt 3+, also scan ReplicatedStorage modules
+        if attempts >= 3 and not rsScanned then
+            rsScanned = true
+            scanReplicatedStorage(allTables)
+            log("API", "Added ReplicatedStorage modules to scan pool")
+        end
+        
+        -- STRATEGY 1: Look for the classic shared table (rawget Utilities)
+        for _, t in ipairs(allTables) do
+            pcall(function()
+                if rawget(t, "Utilities") and type(rawget(t, "Utilities")) == "table" then
+                    -- Verify it has at least one more known module
+                    for _, checkKey in ipairs({"Battle", "Network", "Menu", "DataManager", "BattleGui"}) do
+                        if rawget(t, checkKey) then
+                            gameAPI = t
+                            log("API", "gameAPI found via Utilities key! (classic shared table)")
+                            return
+                        end
+                    end
+                end
+            end)
+            if gameAPI then break end
+        end
+        
+        -- STRATEGY 2: Scoring-based (flexible key names)
         if not gameAPI then
-            if attempts == 5 then
-                log("API", "gameAPI not found after 5 attempts, running diagnostic dump...")
-                dumpCandidateTables()
+            local bestScore, bestTable, bestKeys = 0, nil, {}
+            for _, t in ipairs(allTables) do
+                local score, matched = scoreTableAsShared(t)
+                if score > bestScore then
+                    bestScore = score
+                    bestTable = t
+                    bestKeys = matched
+                end
             end
-            if attempts % 15 == 0 then
-                log("API", "Still searching for gameAPI... (attempt " .. attempts .. ", min score needed: " .. MIN_SCORE_THRESHOLD .. ")")
-                -- Lower threshold progressively
-                if attempts >= 30 and MIN_SCORE_THRESHOLD > 8 then
-                    MIN_SCORE_THRESHOLD = 8
-                    log("API", "Lowered score threshold to 8")
-                end
-                if attempts >= 60 and MIN_SCORE_THRESHOLD > 3 then
-                    MIN_SCORE_THRESHOLD = 3
-                    log("API", "Lowered score threshold to 3 — looking for ANY partial match")
-                end
+            -- Threshold: need at least 15 on first attempts, then lower
+            local threshold = 15
+            if attempts >= 5 then threshold = 8 end
+            if attempts >= 10 then threshold = 3 end
+            if bestScore >= threshold then
+                gameAPI = bestTable
+                log("API", string.format("gameAPI found via scoring! Score: %d, Keys: [%s]",
+                    bestScore, table.concat(bestKeys, ", ")))
+            end
+        end
+        
+        -- STRATEGY 3: Build SYNTHETIC gameAPI from individual modules
+        if not gameAPI and attempts >= 3 then
+            log("API", "No shared table found. Attempting synthetic gameAPI build...")
+            local synthetic, found = buildSyntheticAPI(allTables)
+            
+            -- Need at least 3 core modules to consider it viable
+            local coreCount = 0
+            for _, coreName in ipairs({"Battle", "Network", "Menu", "DataManager", "BattleGui"}) do
+                if synthetic[coreName] then coreCount = coreCount + 1 end
+            end
+            local totalFound = 0
+            for _ in pairs(found) do totalFound = totalFound + 1 end
+            
+            if coreCount >= 2 or totalFound >= 4 then
+                gameAPI = synthetic
+                log("API", string.format("Synthetic gameAPI built! %d modules found (%d core)",
+                    totalFound, coreCount))
+            elseif totalFound > 0 and attempts >= 8 then
+                -- Desperate: accept even partial match after many attempts
+                gameAPI = synthetic
+                log("API", string.format("Partial synthetic gameAPI accepted (%d modules) after %d attempts",
+                    totalFound, attempts))
+            else
+                log("API", string.format("Synthetic build found %d modules (%d core) — not enough yet",
+                    totalFound, coreCount))
+            end
+        end
+        
+        if not gameAPI then
+            -- Diagnostic dump on attempt 5
+            if attempts == 5 and not diagnosticDone then
+                diagnosticDone = true
+                dumpCandidateTables(allTables)
+            end
+            if attempts % 10 == 0 then
+                log("API", "Still searching for gameAPI... (attempt " .. attempts .. ")")
             end
             task.wait(1)
         end
     end
     
-    logGameAPIStatus()
+    -- Log what we found
+    local found = {}
+    pcall(function()
+        for k, v in pairs(gameAPI) do
+            if type(k) == "string" then
+                table.insert(found, k .. "(" .. type(v) .. ")")
+            end
+        end
+    end)
+    table.sort(found)
+    log("API", "gameAPI keys: " .. table.concat(found, ", "))
     
-    -- Install hooks safely (each in its own pcall so one failure doesn't block others)
-    -- Use apiGet() to find keys by primary name + variants
-    
-    local Battle = apiGet("Battle", "battle", "BattleManager", "BattleSystem", "CombatManager", "Combat")
-    local DataMgr = apiGet("DataManager", "dataManager", "Data", "DataModule", "GameData")
-    local Net = apiGet("Network", "network", "NetworkManager", "Net", "RemoteManager", "ServerAPI", "API")
-    local BGui = apiGet("BattleGui", "battleGui", "BattleUI", "CombatUI")
-    local MenuMod = apiGet("Menu", "menu", "MenuManager")
-    local MC = apiGet("MasterControl", "masterControl", "Controller", "PlayerController", "MovementController")
-    local NPC = apiGet("NPCChat", "npcChat", "Chat", "Dialogue", "DialogueManager")
+    -- ============================================================
+    -- INSTALL HOOKS (each in its own pcall)
+    -- ============================================================
+    local Battle = gameAPI.Battle
+    local DataMgr = gameAPI.DataManager
+    local Net = gameAPI.Network
+    local BGui = gameAPI.BattleGui
+    local MenuMod = gameAPI.Menu
+    local MC = gameAPI.MasterControl
     
     -- Hook setupScene
     pcall(function()
@@ -496,7 +559,7 @@ task.spawn(function()
         end
     end)
     
-    -- Hook doTrainerBattle to wait for heal before trainer battles
+    -- Hook doTrainerBattle
     pcall(function()
         if Battle and Battle.doTrainerBattle then
             local old = Battle.doTrainerBattle
@@ -531,7 +594,7 @@ task.spawn(function()
         end
     end)
     
-    -- Suppress mastery progress when masteryDisable is on
+    -- Suppress mastery progress
     pcall(function()
         if MenuMod and MenuMod.mastery and MenuMod.mastery.showProgressUpdate then
             local old = MenuMod.mastery.showProgressUpdate
@@ -566,55 +629,8 @@ task.spawn(function()
         end
     end)
     
-    -- ============================================================
-    -- KEY ALIASING: Ensure that gameAPI.Battle, gameAPI.Network etc.
-    -- all exist even if the game renamed them. The rest of the code
-    -- uses these canonical names, so we create aliases.
-    -- ============================================================
-    local ALIAS_MAP = {
-        Battle    = {"battle", "BattleManager", "BattleSystem", "CombatManager", "Combat"},
-        Network   = {"network", "NetworkManager", "Net", "RemoteManager", "ServerAPI", "API"},
-        Menu      = {"menu", "MenuManager"},
-        DataManager = {"dataManager", "Data", "DataModule", "GameData"},
-        Utilities = {"utilities", "Utils", "Util", "Helper", "Helpers"},
-        BattleGui = {"battleGui", "BattleUI", "CombatUI"},
-        NPCChat   = {"npcChat", "Chat", "Dialogue", "DialogueManager"},
-        MasterControl = {"masterControl", "Controller", "PlayerController", "MovementController"},
-        PlayerData = {"playerData", "Player", "LocalPlayerData"},
-        Repel      = {"repel", "RepelSystem"},
-        WalkEvents = {"walkEvents", "Walk", "Movement"},
-        BattleClientSprite = {"battleClientSprite"},
-        BattleClientSide   = {"battleClientSide"},
-        Constants  = {"constants"},
-        Assets     = {"assets"},
-        Fishing    = {"fishing", "FishingModule"},
-        ObjectiveManager = {"objectiveManager"},
-        RoundedFrame = {"roundedFrame"},
-        BitBuffer  = {"bitBuffer"},
-        ArcadeController = {"arcadeController"},
-    }
-    
-    local aliasCount = 0
-    for canonicalName, variants in pairs(ALIAS_MAP) do
-        if not rawget(gameAPI, canonicalName) then
-            -- Try to find it under a variant name
-            for _, variant in ipairs(variants) do
-                local val = rawget(gameAPI, variant)
-                if val then
-                    gameAPI[canonicalName] = val
-                    aliasCount = aliasCount + 1
-                    log("ALIAS", canonicalName .. " -> " .. variant)
-                    break
-                end
-            end
-        end
-    end
-    if aliasCount > 0 then
-        log("ALIAS", "Created " .. aliasCount .. " key aliases for compatibility")
-    end
-    
     gameAPIReady = true
-    log("INFO", "All gameAPI hooks installed successfully. LumiWare is ready.")
+    log("INFO", "All gameAPI hooks installed. LumiWare is ready.")
 end)
 
 --------------------------------------------------
