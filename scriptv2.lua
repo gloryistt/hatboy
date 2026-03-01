@@ -289,79 +289,81 @@ end
 
 -- ============================================================
 -- TABLE COLLECTORS — gather tables from every available source
+-- Tailored for executors where getgc(true) returns functions
+-- but NOT tables, and getupvalues is missing.
+-- Key insight: use getfenv() on functions to find module envs.
 -- ============================================================
-local function gatherTablesFromGC()
+
+-- Strategy A: getgc(true) → filter functions → getfenv on each
+-- This is the MOST IMPORTANT strategy for this executor.
+local function gatherTablesFromGCEnv()
     local tbls = {}
     if not HAS.getgc then return tbls end
     local ok, gc = pcall(HAS.getgc, true)
     if not ok or type(gc) ~= "table" then
-        log("API", "getgc(true) returned: " .. tostring(gc) .. " (ok=" .. tostring(ok) .. ")")
+        log("API", "getgc(true) failed: " .. tostring(gc))
         return tbls
     end
-    local count, tableCount = 0, 0
+    
+    local objCount, funcCount, tableCount, envCount = 0, 0, 0, 0
+    local seenEnv = {}
+    
     for _, obj in ipairs(gc) do
-        count = count + 1
+        objCount = objCount + 1
+        
+        -- Direct tables (some executors do return them)
         if type(obj) == "table" then
             tableCount = tableCount + 1
             tbls[#tbls+1] = obj
         end
-    end
-    log("API", "getgc returned " .. count .. " objects, " .. tableCount .. " tables")
-    return tbls
-end
-
-local function gatherTablesFromRegistry()
-    local tbls = {}
-    pcall(function()
-        if not debug or not debug.getregistry then return end
-        local reg = debug.getregistry()
-        if type(reg) ~= "table" then return end
-        for _, v in pairs(reg) do
-            if type(v) == "table" then
-                tbls[#tbls+1] = v
-            elseif type(v) == "function" then
-                local ups = safeGetUpvalues(v)
+        
+        -- Functions → getfenv to find their environment
+        if type(obj) == "function" then
+            funcCount = funcCount + 1
+            pcall(function()
+                local env = getfenv(obj)
+                if type(env) == "table" and not seenEnv[env] 
+                   and env ~= _G and env ~= getfenv(0) then
+                    seenEnv[env] = true
+                    envCount = envCount + 1
+                    tbls[#tbls+1] = env
+                    -- Scan env for sub-tables (module references)
+                    for k, v in pairs(env) do
+                        if type(v) == "table" and type(k) == "string" then
+                            tbls[#tbls+1] = v
+                        end
+                    end
+                end
+            end)
+            -- Also try getupvalues if available
+            pcall(function()
+                local ups = safeGetUpvalues(obj)
                 for _, upv in pairs(ups) do
                     if type(upv) == "table" then tbls[#tbls+1] = upv end
                 end
-            end
+            end)
         end
-        log("API", "Registry scan found " .. #tbls .. " tables")
-    end)
+    end
+    
+    log("API", string.format("getgc: %d objects, %d funcs, %d tables, %d envs → %d collected",
+        objCount, funcCount, tableCount, envCount, #tbls))
     return tbls
 end
 
-local function gatherTablesFromGetreg()
-    local tbls = {}
-    if not HAS.getreg then return tbls end
-    pcall(function()
-        local reg = HAS.getreg()
-        if type(reg) == "table" then
-            for _, v in pairs(reg) do
-                if type(v) == "table" then tbls[#tbls+1] = v end
-            end
-        end
-        log("API", "getreg found " .. #tbls .. " tables")
-    end)
-    return tbls
-end
-
--- Strategy 3: getconnections on RemoteEvents
+-- Strategy B: getconnections → getfenv on handler functions
 local function gatherTablesFromConnections()
     local tbls = {}
-    if not HAS.getconnections then
-        log("API", "getconnections not available, skipping connection scan")
-        return tbls
-    end
-    pcall(function()
-        local RS = game:GetService("ReplicatedStorage")
+    if not HAS.getconnections then return tbls end
+    
+    local ok2, err2 = pcall(function()
         local events = {}
-        for _, obj in ipairs(RS:GetDescendants()) do
-            if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") or obj:IsA("BindableEvent") then
-                events[#events+1] = obj
+        pcall(function()
+            for _, obj in ipairs(game:GetService("ReplicatedStorage"):GetDescendants()) do
+                if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") or obj:IsA("BindableEvent") then
+                    events[#events+1] = obj
+                end
             end
-        end
-        -- Also check player GUI
+        end)
         pcall(function()
             for _, obj in ipairs(player:WaitForChild("PlayerGui", 2):GetDescendants()) do
                 if obj:IsA("RemoteEvent") or obj:IsA("BindableEvent") then
@@ -371,79 +373,63 @@ local function gatherTablesFromConnections()
         end)
         
         local connCount = 0
+        local seenEnv = {}
         for _, evt in ipairs(events) do
             pcall(function()
                 local conns = HAS.getconnections(evt.OnClientEvent or evt.Event)
-                if type(conns) == "table" then
-                    for _, conn in ipairs(conns) do
+                if type(conns) ~= "table" then return end
+                for _, conn in ipairs(conns) do
+                    pcall(function()
+                        local func = conn.Function or conn["function"]
+                        if not func then return end
+                        connCount = connCount + 1
+                        
+                        -- getfenv on the handler (primary method when getupvalues missing)
                         pcall(function()
-                            local func = conn.Function or conn["function"]
-                            if func then
-                                connCount = connCount + 1
-                                local ups = safeGetUpvalues(func)
-                                for _, upv in pairs(ups) do
-                                    if type(upv) == "table" then
-                                        tbls[#tbls+1] = upv
-                                    end
-                                end
-                                -- Also check upvalue tables one level deep
-                                for _, upv in pairs(ups) do
-                                    if type(upv) == "table" then
-                                        pcall(function()
-                                            for k2, v2 in pairs(upv) do
-                                                if type(v2) == "table" and type(k2) == "string" then
-                                                    tbls[#tbls+1] = v2
-                                                end
-                                            end
-                                        end)
+                            local env = getfenv(func)
+                            if type(env) == "table" and not seenEnv[env]
+                               and env ~= _G and env ~= getfenv(0) then
+                                seenEnv[env] = true
+                                tbls[#tbls+1] = env
+                                for k, v in pairs(env) do
+                                    if type(v) == "table" and type(k) == "string" then
+                                        tbls[#tbls+1] = v
                                     end
                                 end
                             end
                         end)
-                    end
+                        
+                        -- Also try upvalues if available
+                        local ups = safeGetUpvalues(func)
+                        for _, upv in pairs(ups) do
+                            if type(upv) == "table" then tbls[#tbls+1] = upv end
+                        end
+                    end)
                 end
             end)
         end
-        log("API", "Connection scan: " .. connCount .. " connections → " .. #tbls .. " tables")
+        log("API", "Connections: " .. connCount .. " handlers → " .. #tbls .. " tables")
     end)
+    if not ok2 then log("API", "Connection scan error: " .. tostring(err2)) end
     return tbls
 end
 
--- Strategy 4: require() all ModuleScripts
+-- Strategy C: require() all ModuleScripts from known services
 local function gatherTablesFromRequire()
     local tbls = {}
-    pcall(function()
-        -- Set thread identity for requiring game modules
+    local ok2, err2 = pcall(function()
         pcall(setThreadContext, 2)
         
-        local RS = game:GetService("ReplicatedStorage")
         local moduleCount, successCount = 0, 0
-        for _, child in ipairs(RS:GetDescendants()) do
-            if child:IsA("ModuleScript") then
-                moduleCount = moduleCount + 1
-                pcall(function()
-                    local mod = require(child)
-                    if type(mod) == "table" then
-                        successCount = successCount + 1
-                        tbls[#tbls+1] = mod
-                        -- Also add sub-tables
-                        pcall(function()
-                            for k, v in pairs(mod) do
-                                if type(v) == "table" and type(k) == "string" then
-                                    tbls[#tbls+1] = v
-                                end
-                            end
-                        end)
-                    end
-                end)
-            end
-        end
+        local services = {}
+        pcall(function() services[#services+1] = game:GetService("ReplicatedStorage") end)
+        pcall(function() services[#services+1] = game:GetService("ReplicatedFirst") end)
+        pcall(function() services[#services+1] = game:GetService("StarterPlayer") end)
+        pcall(function() services[#services+1] = game:GetService("StarterGui") end)
         
-        -- Also try StarterPlayer scripts
-        pcall(function()
-            local SP = game:GetService("StarterPlayer")
-            if SP then
-                for _, child in ipairs(SP:GetDescendants()) do
+        for _, svc in ipairs(services) do
+            pcall(function()
+                for _, child in ipairs(svc:GetDescendants()) do
                     if child:IsA("ModuleScript") then
                         moduleCount = moduleCount + 1
                         pcall(function()
@@ -462,103 +448,140 @@ local function gatherTablesFromRequire()
                         end)
                     end
                 end
-            end
-        end)
-        
-        log("API", "Require scan: " .. moduleCount .. " modules tried, " .. successCount .. " returned tables → " .. #tbls .. " total")
+            end)
+        end
+        log("API", "Require: " .. moduleCount .. " modules, " .. successCount .. " success → " .. #tbls .. " tables")
     end)
+    if not ok2 then log("API", "Require scan error: " .. tostring(err2)) end
     return tbls
 end
 
--- Strategy 5: Deep upvalue scan on ALL functions from getgc
-local function gatherTablesFromUpvalues()
-    local tbls = {}
-    if not HAS.getgc then return tbls end
-    pcall(function()
-        local funcCount = 0
-        local ok, gc = pcall(HAS.getgc)  -- getgc() without true = only functions
-        if not ok or type(gc) ~= "table" then
-            -- Try getgc(false) or just getgc()
-            return
-        end
-        for _, func in ipairs(gc) do
-            if type(func) == "function" then
-                funcCount = funcCount + 1
-                pcall(function()
-                    local ups = safeGetUpvalues(func)
-                    for _, upv in pairs(ups) do
-                        if type(upv) == "table" then
-                            tbls[#tbls+1] = upv
-                        end
-                    end
-                end)
-            end
-        end
-        log("API", "Upvalue scan: " .. funcCount .. " functions → " .. #tbls .. " tables")
-    end)
-    return tbls
-end
-
--- Strategy 7: getfenv on functions
-local function gatherTablesFromEnv()
-    local tbls = {}
-    if not HAS.getgc or not getfenv then return tbls end
-    pcall(function()
-        local ok, gc = pcall(HAS.getgc)
-        if not ok or type(gc) ~= "table" then return end
-        local envs = 0
-        for _, func in ipairs(gc) do
-            if type(func) == "function" then
-                pcall(function()
-                    local env = getfenv(func)
-                    if type(env) == "table" and env ~= _G and env ~= getfenv(0) then
-                        envs = envs + 1
-                        tbls[#tbls+1] = env
-                        -- Check for a "shared" or "modules" key in the env
-                        pcall(function()
-                            for k, v in pairs(env) do
-                                if type(v) == "table" and type(k) == "string" then
-                                    tbls[#tbls+1] = v
-                                end
-                            end
-                        end)
-                    end
-                end)
-            end
-        end
-        log("API", "Env scan: " .. envs .. " unique envs → " .. #tbls .. " tables")
-    end)
-    return tbls
-end
-
--- Strategy 8: getscripts / getrunningscripts
+-- Strategy D: getscripts/getrunningscripts → require ModuleScripts
 local function gatherTablesFromScripts()
     local tbls = {}
     local scriptFunc = HAS.getscripts or HAS.getrunningscripts
     if not scriptFunc then return tbls end
-    pcall(function()
+    
+    local ok2, err2 = pcall(function()
+        pcall(setThreadContext, 2)
         local scripts = scriptFunc()
         if type(scripts) ~= "table" then return end
-        local count = 0
+        
+        local count, successCount = 0, 0
         for _, scr in ipairs(scripts) do
-            if typeof(scr) == "Instance" and scr:IsA("ModuleScript") then
-                count = count + 1
-                pcall(function()
-                    local mod = require(scr)
-                    if type(mod) == "table" then
-                        tbls[#tbls+1] = mod
-                        pcall(function()
-                            for k, v in pairs(mod) do
-                                if type(v) == "table" and type(k) == "string" then
-                                    tbls[#tbls+1] = v
+            pcall(function()
+                if typeof(scr) == "Instance" and scr:IsA("ModuleScript") then
+                    count = count + 1
+                    pcall(function()
+                        local mod = require(scr)
+                        if type(mod) == "table" then
+                            successCount = successCount + 1
+                            tbls[#tbls+1] = mod
+                            pcall(function()
+                                for k, v in pairs(mod) do
+                                    if type(v) == "table" and type(k) == "string" then
+                                        tbls[#tbls+1] = v
+                                    end
                                 end
+                            end)
+                        end
+                    end)
+                end
+            end)
+        end
+        log("API", "Scripts: " .. count .. " ModuleScripts, " .. successCount .. " success → " .. #tbls .. " tables")
+    end)
+    if not ok2 then log("API", "Scripts scan error: " .. tostring(err2)) end
+    return tbls
+end
+
+-- Strategy E: getnilinstances / getinstances → find ModuleScripts
+local function gatherTablesFromInstances()
+    local tbls = {}
+    
+    local ok2, err2 = pcall(function()
+        pcall(setThreadContext, 2)
+        local count, successCount = 0, 0
+        
+        local allInsts = {}
+        pcall(function()
+            if HAS.getnilinstances then
+                local nils = HAS.getnilinstances()
+                if type(nils) == "table" then
+                    for _, inst in ipairs(nils) do allInsts[#allInsts+1] = inst end
+                end
+            end
+        end)
+        pcall(function()
+            if HAS.getinstances then
+                local insts = HAS.getinstances()
+                if type(insts) == "table" then
+                    for _, inst in ipairs(insts) do allInsts[#allInsts+1] = inst end
+                end
+            end
+        end)
+        
+        for _, inst in ipairs(allInsts) do
+            pcall(function()
+                if typeof(inst) == "Instance" and inst:IsA("ModuleScript") then
+                    count = count + 1
+                    pcall(function()
+                        local mod = require(inst)
+                        if type(mod) == "table" then
+                            successCount = successCount + 1
+                            tbls[#tbls+1] = mod
+                            pcall(function()
+                                for k, v in pairs(mod) do
+                                    if type(v) == "table" and type(k) == "string" then
+                                        tbls[#tbls+1] = v
+                                    end
+                                end
+                            end)
+                        end
+                    end)
+                end
+            end)
+        end
+        log("API", "Instances: " .. count .. " ModuleScripts, " .. successCount .. " success → " .. #tbls .. " tables")
+    end)
+    if not ok2 then log("API", "Instance scan error: " .. tostring(err2)) end
+    return tbls
+end
+
+-- Strategy F: debug.getregistry
+local function gatherTablesFromRegistry()
+    local tbls = {}
+    pcall(function()
+        if not debug or not debug.getregistry then return end
+        local reg = debug.getregistry()
+        if type(reg) ~= "table" then return end
+        local seenEnv = {}
+        for _, v in pairs(reg) do
+            if type(v) == "table" then
+                tbls[#tbls+1] = v
+            elseif type(v) == "function" then
+                -- Try getfenv
+                pcall(function()
+                    local env = getfenv(v)
+                    if type(env) == "table" and not seenEnv[env]
+                       and env ~= _G and env ~= getfenv(0) then
+                        seenEnv[env] = true
+                        tbls[#tbls+1] = env
+                        for k2, v2 in pairs(env) do
+                            if type(v2) == "table" and type(k2) == "string" then
+                                tbls[#tbls+1] = v2
                             end
-                        end)
+                        end
                     end
                 end)
+                -- Also try upvalues
+                local ups = safeGetUpvalues(v)
+                for _, upv in pairs(ups) do
+                    if type(upv) == "table" then tbls[#tbls+1] = upv end
+                end
             end
         end
-        log("API", "Scripts scan: " .. count .. " ModuleScripts → " .. #tbls .. " tables")
+        log("API", "Registry: " .. #tbls .. " tables found")
     end)
     return tbls
 end
@@ -669,32 +692,18 @@ task.spawn(function()
     while not gameAPI do
         attempts = attempts + 1
         
-        -- On each attempt, gather tables from progressively more sources
+        -- Run ALL strategies every attempt (they're all fast and pcall-protected)
         local sources = {}
-        
-        -- Always try these
-        sources[#sources+1] = gatherTablesFromGC()
-        sources[#sources+1] = gatherTablesFromRegistry()
-        sources[#sources+1] = gatherTablesFromGetreg()
-        
-        -- From attempt 2+: try connections and upvalues
-        if attempts >= 2 then
-            sources[#sources+1] = gatherTablesFromConnections()
-            sources[#sources+1] = gatherTablesFromUpvalues()
-        end
-        
-        -- From attempt 3+: try require and env
-        if attempts >= 3 then
-            sources[#sources+1] = gatherTablesFromRequire()
-            sources[#sources+1] = gatherTablesFromEnv()
-            sources[#sources+1] = gatherTablesFromScripts()
-        end
+        sources[#sources+1] = gatherTablesFromGCEnv()        -- A: getgc+getfenv (primary)
+        sources[#sources+1] = gatherTablesFromConnections()   -- B: connections+getfenv
+        sources[#sources+1] = gatherTablesFromRequire()       -- C: require ModuleScripts
+        sources[#sources+1] = gatherTablesFromScripts()       -- D: getscripts+require
+        sources[#sources+1] = gatherTablesFromInstances()     -- E: getinstances+require
+        sources[#sources+1] = gatherTablesFromRegistry()      -- F: debug.getregistry+getfenv
         
         -- Deduplicate and expand
         local allTables = deduplicateAndExpand(sources)
-        if attempts <= 3 or attempts % 10 == 0 then
-            log("API", "Attempt " .. attempts .. ": " .. #allTables .. " unique tables to scan")
-        end
+        log("API", "Attempt " .. attempts .. ": " .. #allTables .. " unique tables collected")
         
         -- STRATEGY 1: Classic shared table (rawget Utilities)
         for _, t in ipairs(allTables) do
@@ -721,7 +730,7 @@ task.spawn(function()
                     bestScore = score; bestTable = t; bestKeys = matched
                 end
             end
-            local threshold = (attempts < 5 and 15) or (attempts < 10 and 8) or 3
+            local threshold = (attempts < 3 and 15) or (attempts < 6 and 8) or 3
             if bestScore >= threshold then
                 gameAPI = bestTable
                 log("API", string.format("Shared table via scoring! Score=%d Keys=[%s]",
@@ -729,8 +738,8 @@ task.spawn(function()
             end
         end
         
-        -- STRATEGY 3: Build synthetic API
-        if not gameAPI and attempts >= 3 then
+        -- STRATEGY 3: Build synthetic API from signatures
+        if not gameAPI and attempts >= 2 then
             local synthetic, found = buildSyntheticAPI(allTables)
             local coreCount = 0
             for _, cn in ipairs({"Battle", "Network", "Menu", "DataManager", "BattleGui"}) do
@@ -742,22 +751,22 @@ task.spawn(function()
             if coreCount >= 2 or total >= 4 then
                 gameAPI = synthetic
                 log("API", string.format("Synthetic gameAPI! %d modules (%d core)", total, coreCount))
-            elseif total > 0 and attempts >= 8 then
+            elseif total > 0 and attempts >= 6 then
                 gameAPI = synthetic
                 log("API", string.format("Partial synthetic accepted: %d modules after %d attempts", total, attempts))
-            elseif attempts <= 5 or attempts % 10 == 0 then
-                log("API", string.format("Synthetic: %d modules (%d core) — not enough", total, coreCount))
+            elseif attempts <= 3 or attempts % 5 == 0 then
+                log("API", string.format("Synthetic: %d modules (%d core) — need more", total, coreCount))
             end
         end
         
-        -- Diagnostic dump on attempt 5
-        if not gameAPI and attempts == 5 and not diagnosticDone then
+        -- Diagnostic dump on attempt 3
+        if not gameAPI and attempts == 3 and not diagnosticDone then
             diagnosticDone = true
             dumpDiagnostic(allTables)
         end
         
         if not gameAPI then
-            if attempts % 10 == 0 then
+            if attempts % 5 == 0 then
                 log("API", "Still searching... attempt " .. attempts)
             end
             task.wait(1)
