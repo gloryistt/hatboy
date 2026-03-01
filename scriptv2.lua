@@ -120,25 +120,100 @@ end
 log("INFO", "Initializing LumiWare " .. VERSION .. " for:", PLAYER_NAME)
 
 --------------------------------------------------
--- GAME API EXFILTRATION (v5.0 — Hybrid Discovery)
+-- GAME API EXFILTRATION (v6.0 — Multi-Strategy with Diagnostics)
 --
--- The game no longer stores all modules in one shared table.
--- Strategy:
---   1. Try the ORIGINAL approach: find a table with "Utilities" key in getgc
---   2. Try scoring approach with flexible key names
---   3. If no shared table found: BUILD A SYNTHETIC gameAPI by finding
---      individual modules through their method signatures
---   4. Aggressive diagnostic dump if all else fails
+-- Strategies (tried in order, first success wins):
+--   1. Classic: getgc(true) → find table with "Utilities" key
+--   2. Scoring: getgc/registry → score tables by known key names
+--   3. Connections: getconnections() on RemoteEvents → upvalues
+--   4. Require: require() ALL ModuleScripts (with thread identity)
+--   5. Deep upvalue: getupvalues on ALL functions in getgc
+--   6. Synthetic: build from individual module signatures
+--   7. Environment: scan function environments (getfenv)
+--   8. getnilinstances / getscripts fallback
 --------------------------------------------------
 local gameAPI = nil
-local gameAPIReady = false  -- true ONLY after all hooks are installed
-local setThreadContext = setthreadcontext or function(_) end
+local gameAPIReady = false
+local setThreadContext = setthreadcontext or setthreadidentity or setidentity or function(_) end
 
 -- ============================================================
--- MODULE SIGNATURES: Identify individual modules by their unique
--- combinations of methods/properties, NOT by their parent table key.
--- Each entry: { canonical name, { required keys }, { optional bonus keys } }
--- A module must have ALL required keys to match.
+-- STEP 0: Detect which executor APIs are available
+-- ============================================================
+local HAS = {}
+local function probe(name)
+    local ok, val = pcall(function()
+        return getfenv()[name] or _G[name] or getgenv and getgenv()[name]
+    end)
+    if ok and val then HAS[name] = val; return val end
+    -- try rawget on shared environments
+    pcall(function()
+        local v = rawget(getfenv(0), name)
+        if v then HAS[name] = v end
+    end)
+    pcall(function()
+        if not HAS[name] and getgenv then
+            local v = rawget(getgenv(), name)
+            if v then HAS[name] = v end
+        end
+    end)
+    return HAS[name]
+end
+
+-- Probe all relevant APIs
+for _, apiName in ipairs({
+    "getgc", "getupvalues", "getupvalue", "debug",
+    "getreg", "getconnections", "getscripts", "getrunningscripts",
+    "getnilinstances", "getinstances", "getfenv", "hookfunction",
+    "hookmetamethod", "newcclosure", "iscclosure", "getinfo",
+    "getconstants", "getprotos", "getstack", "checkcaller",
+    "setthreadcontext", "setthreadidentity", "setidentity",
+    "getnamecallmethod", "getrawmetatable",
+}) do
+    probe(apiName)
+end
+
+-- Log available APIs
+do
+    local available = {}
+    local missing = {}
+    for _, name in ipairs({"getgc", "getupvalues", "getreg", "getconnections", "getscripts", 
+                           "getrunningscripts", "getnilinstances", "getinstances", "getfenv",
+                           "getconstants", "getprotos", "setthreadcontext", "setthreadidentity"}) do
+        if HAS[name] then
+            table.insert(available, name)
+        else
+            table.insert(missing, name)
+        end
+    end
+    log("API", "Available APIs: " .. (next(available) and table.concat(available, ", ") or "NONE"))
+    log("API", "Missing APIs: " .. (next(missing) and table.concat(missing, ", ") or "none"))
+end
+
+-- Convenience: getupvalues that works across executor APIs
+local function safeGetUpvalues(func)
+    if type(func) ~= "function" then return {} end
+    -- Try getupvalues first (returns {[name]=value} or {[idx]=value})
+    if HAS.getupvalues then
+        local ok, ups = pcall(HAS.getupvalues, func)
+        if ok and type(ups) == "table" then return ups end
+    end
+    -- Try debug.getupvalue iteration
+    if debug and debug.getupvalue then
+        local ups = {}
+        local ok = pcall(function()
+            for i = 1, 200 do
+                local name, val = debug.getupvalue(func, i)
+                if name == nil then break end
+                ups[i] = val
+            end
+        end)
+        if ok and next(ups) then return ups end
+    end
+    return {}
+end
+
+-- ============================================================
+-- MODULE SIGNATURES for synthetic build
 -- ============================================================
 local MODULE_SIGNATURES = {
     {"Battle",     {"setupScene"},                                  {"doTrainerBattle", "doWildBattle", "currentBattle"}},
@@ -146,7 +221,7 @@ local MODULE_SIGNATURES = {
     {"Menu",       {"disable", "enable"},                           {"pc", "shop", "rally", "mastery", "options", "fastClose", "enabled"}},
     {"DataManager",{"loadChunk"},                                   {"loadModule", "currentChunk", "setLoading", "getModule"}},
     {"BattleGui",  {"message"},                                     {"switchMonster", "animHit", "animMove", "animWeather", "animStatus", "animAbility", "animBoost", "setCameraIfLookingAway"}},
-    {"NPCChat",    {},                                              {"Say", "say", "manualAdvance"}}, -- at least 2 of optional
+    {"NPCChat",    {},                                              {"Say", "say", "manualAdvance"}},
     {"MasterControl", {"WalkEnabled"},                              {}},
     {"Utilities",  {"FadeOut", "FadeIn"},                           {"TeleportToSpawnBox", "Teleport"}},
     {"PlayerData", {"completedEvents"},                             {}},
@@ -159,21 +234,15 @@ local MODULE_SIGNATURES = {
     {"ArcadeController",   {"playing"},                             {}},
 }
 
--- Check if a table matches a module signature
--- Returns: score (0 = no match, higher = better match)
 local function matchSignature(tbl, sig)
     local name, required, optional = sig[1], sig[2], sig[3]
     if type(tbl) ~= "table" then return 0 end
-
     local ok, score = pcall(function()
         local s = 0
-        -- ALL required keys must exist
         for _, key in ipairs(required) do
-            local val = rawget(tbl, key)
-            if val == nil then return 0 end
+            if rawget(tbl, key) == nil then return 0 end
             s = s + 10
         end
-        -- NPCChat special: needs at least 2 of Say/say/manualAdvance
         if name == "NPCChat" then
             local optCount = 0
             for _, key in ipairs(optional) do
@@ -182,7 +251,6 @@ local function matchSignature(tbl, sig)
             if optCount < 2 then return 0 end
             s = s + optCount * 5
         else
-            -- Bonus for optional keys
             for _, key in ipairs(optional) do
                 if rawget(tbl, key) ~= nil then s = s + 5 end
             end
@@ -192,9 +260,7 @@ local function matchSignature(tbl, sig)
     return (ok and score) or 0
 end
 
--- ============================================================
--- STRATEGY 1: Original approach — look for shared table
--- ============================================================
+-- Known shared-table keys and scoring
 local KNOWN_KEYS = {
     Battle = 10, Network = 10, Utilities = 10, DataManager = 10,
     BattleGui = 10, NPCChat = 10, MasterControl = 10, Menu = 10,
@@ -202,107 +268,342 @@ local KNOWN_KEYS = {
     BattleClientSide = 5, Constants = 5, Assets = 5, Fishing = 5,
     ObjectiveManager = 5, RoundedFrame = 5, BitBuffer = 5,
     Mining = 3, ArcadeController = 3,
-    -- lowercase/variant names
     battle = 10, network = 10, utilities = 10, dataManager = 10,
     battleGui = 10, npcChat = 10, masterControl = 10, menu = 10,
     playerData = 5, repel = 5, walkEvents = 5, fishing = 5,
 }
 
-local function scoreTableAsShared(t)
-    if type(t) ~= "table" then return 0 end
-    local score = 0
-    local matched = {}
+local function scoreSharedTable(t)
+    if type(t) ~= "table" then return 0, {} end
+    local score, matched = 0, {}
     pcall(function()
-        for k, _ in pairs(t) do
+        for k in pairs(t) do
             if type(k) == "string" and KNOWN_KEYS[k] then
                 score = score + KNOWN_KEYS[k]
-                table.insert(matched, k)
+                matched[#matched+1] = k
             end
         end
     end)
     return score, matched
 end
 
--- Gather all scannable tables from getgc + registry + getreg
-local function gatherAllTables()
+-- ============================================================
+-- TABLE COLLECTORS — gather tables from every available source
+-- ============================================================
+local function gatherTablesFromGC()
+    local tbls = {}
+    if not HAS.getgc then return tbls end
+    local ok, gc = pcall(HAS.getgc, true)
+    if not ok or type(gc) ~= "table" then
+        log("API", "getgc(true) returned: " .. tostring(gc) .. " (ok=" .. tostring(ok) .. ")")
+        return tbls
+    end
+    local count, tableCount = 0, 0
+    for _, obj in ipairs(gc) do
+        count = count + 1
+        if type(obj) == "table" then
+            tableCount = tableCount + 1
+            tbls[#tbls+1] = obj
+        end
+    end
+    log("API", "getgc returned " .. count .. " objects, " .. tableCount .. " tables")
+    return tbls
+end
+
+local function gatherTablesFromRegistry()
+    local tbls = {}
+    pcall(function()
+        if not debug or not debug.getregistry then return end
+        local reg = debug.getregistry()
+        if type(reg) ~= "table" then return end
+        for _, v in pairs(reg) do
+            if type(v) == "table" then
+                tbls[#tbls+1] = v
+            elseif type(v) == "function" then
+                local ups = safeGetUpvalues(v)
+                for _, upv in pairs(ups) do
+                    if type(upv) == "table" then tbls[#tbls+1] = upv end
+                end
+            end
+        end
+        log("API", "Registry scan found " .. #tbls .. " tables")
+    end)
+    return tbls
+end
+
+local function gatherTablesFromGetreg()
+    local tbls = {}
+    if not HAS.getreg then return tbls end
+    pcall(function()
+        local reg = HAS.getreg()
+        if type(reg) == "table" then
+            for _, v in pairs(reg) do
+                if type(v) == "table" then tbls[#tbls+1] = v end
+            end
+        end
+        log("API", "getreg found " .. #tbls .. " tables")
+    end)
+    return tbls
+end
+
+-- Strategy 3: getconnections on RemoteEvents
+local function gatherTablesFromConnections()
+    local tbls = {}
+    if not HAS.getconnections then
+        log("API", "getconnections not available, skipping connection scan")
+        return tbls
+    end
+    pcall(function()
+        local RS = game:GetService("ReplicatedStorage")
+        local events = {}
+        for _, obj in ipairs(RS:GetDescendants()) do
+            if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") or obj:IsA("BindableEvent") then
+                events[#events+1] = obj
+            end
+        end
+        -- Also check player GUI
+        pcall(function()
+            for _, obj in ipairs(player:WaitForChild("PlayerGui", 2):GetDescendants()) do
+                if obj:IsA("RemoteEvent") or obj:IsA("BindableEvent") then
+                    events[#events+1] = obj
+                end
+            end
+        end)
+        
+        local connCount = 0
+        for _, evt in ipairs(events) do
+            pcall(function()
+                local conns = HAS.getconnections(evt.OnClientEvent or evt.Event)
+                if type(conns) == "table" then
+                    for _, conn in ipairs(conns) do
+                        pcall(function()
+                            local func = conn.Function or conn["function"]
+                            if func then
+                                connCount = connCount + 1
+                                local ups = safeGetUpvalues(func)
+                                for _, upv in pairs(ups) do
+                                    if type(upv) == "table" then
+                                        tbls[#tbls+1] = upv
+                                    end
+                                end
+                                -- Also check upvalue tables one level deep
+                                for _, upv in pairs(ups) do
+                                    if type(upv) == "table" then
+                                        pcall(function()
+                                            for k2, v2 in pairs(upv) do
+                                                if type(v2) == "table" and type(k2) == "string" then
+                                                    tbls[#tbls+1] = v2
+                                                end
+                                            end
+                                        end)
+                                    end
+                                end
+                            end
+                        end)
+                    end
+                end
+            end)
+        end
+        log("API", "Connection scan: " .. connCount .. " connections → " .. #tbls .. " tables")
+    end)
+    return tbls
+end
+
+-- Strategy 4: require() all ModuleScripts
+local function gatherTablesFromRequire()
+    local tbls = {}
+    pcall(function()
+        -- Set thread identity for requiring game modules
+        pcall(setThreadContext, 2)
+        
+        local RS = game:GetService("ReplicatedStorage")
+        local moduleCount, successCount = 0, 0
+        for _, child in ipairs(RS:GetDescendants()) do
+            if child:IsA("ModuleScript") then
+                moduleCount = moduleCount + 1
+                pcall(function()
+                    local mod = require(child)
+                    if type(mod) == "table" then
+                        successCount = successCount + 1
+                        tbls[#tbls+1] = mod
+                        -- Also add sub-tables
+                        pcall(function()
+                            for k, v in pairs(mod) do
+                                if type(v) == "table" and type(k) == "string" then
+                                    tbls[#tbls+1] = v
+                                end
+                            end
+                        end)
+                    end
+                end)
+            end
+        end
+        
+        -- Also try StarterPlayer scripts
+        pcall(function()
+            local SP = game:GetService("StarterPlayer")
+            if SP then
+                for _, child in ipairs(SP:GetDescendants()) do
+                    if child:IsA("ModuleScript") then
+                        moduleCount = moduleCount + 1
+                        pcall(function()
+                            local mod = require(child)
+                            if type(mod) == "table" then
+                                successCount = successCount + 1
+                                tbls[#tbls+1] = mod
+                                pcall(function()
+                                    for k, v in pairs(mod) do
+                                        if type(v) == "table" and type(k) == "string" then
+                                            tbls[#tbls+1] = v
+                                        end
+                                    end
+                                end)
+                            end
+                        end)
+                    end
+                end
+            end
+        end)
+        
+        log("API", "Require scan: " .. moduleCount .. " modules tried, " .. successCount .. " returned tables → " .. #tbls .. " total")
+    end)
+    return tbls
+end
+
+-- Strategy 5: Deep upvalue scan on ALL functions from getgc
+local function gatherTablesFromUpvalues()
+    local tbls = {}
+    if not HAS.getgc then return tbls end
+    pcall(function()
+        local funcCount = 0
+        local ok, gc = pcall(HAS.getgc)  -- getgc() without true = only functions
+        if not ok or type(gc) ~= "table" then
+            -- Try getgc(false) or just getgc()
+            return
+        end
+        for _, func in ipairs(gc) do
+            if type(func) == "function" then
+                funcCount = funcCount + 1
+                pcall(function()
+                    local ups = safeGetUpvalues(func)
+                    for _, upv in pairs(ups) do
+                        if type(upv) == "table" then
+                            tbls[#tbls+1] = upv
+                        end
+                    end
+                end)
+            end
+        end
+        log("API", "Upvalue scan: " .. funcCount .. " functions → " .. #tbls .. " tables")
+    end)
+    return tbls
+end
+
+-- Strategy 7: getfenv on functions
+local function gatherTablesFromEnv()
+    local tbls = {}
+    if not HAS.getgc or not getfenv then return tbls end
+    pcall(function()
+        local ok, gc = pcall(HAS.getgc)
+        if not ok or type(gc) ~= "table" then return end
+        local envs = 0
+        for _, func in ipairs(gc) do
+            if type(func) == "function" then
+                pcall(function()
+                    local env = getfenv(func)
+                    if type(env) == "table" and env ~= _G and env ~= getfenv(0) then
+                        envs = envs + 1
+                        tbls[#tbls+1] = env
+                        -- Check for a "shared" or "modules" key in the env
+                        pcall(function()
+                            for k, v in pairs(env) do
+                                if type(v) == "table" and type(k) == "string" then
+                                    tbls[#tbls+1] = v
+                                end
+                            end
+                        end)
+                    end
+                end)
+            end
+        end
+        log("API", "Env scan: " .. envs .. " unique envs → " .. #tbls .. " tables")
+    end)
+    return tbls
+end
+
+-- Strategy 8: getscripts / getrunningscripts
+local function gatherTablesFromScripts()
+    local tbls = {}
+    local scriptFunc = HAS.getscripts or HAS.getrunningscripts
+    if not scriptFunc then return tbls end
+    pcall(function()
+        local scripts = scriptFunc()
+        if type(scripts) ~= "table" then return end
+        local count = 0
+        for _, scr in ipairs(scripts) do
+            if typeof(scr) == "Instance" and scr:IsA("ModuleScript") then
+                count = count + 1
+                pcall(function()
+                    local mod = require(scr)
+                    if type(mod) == "table" then
+                        tbls[#tbls+1] = mod
+                        pcall(function()
+                            for k, v in pairs(mod) do
+                                if type(v) == "table" and type(k) == "string" then
+                                    tbls[#tbls+1] = v
+                                end
+                            end
+                        end)
+                    end
+                end)
+            end
+        end
+        log("API", "Scripts scan: " .. count .. " ModuleScripts → " .. #tbls .. " tables")
+    end)
+    return tbls
+end
+
+-- ============================================================
+-- DEDUPLICATE and EXPAND a set of tables
+-- ============================================================
+local function deduplicateAndExpand(tableLists)
     local seen = {}
-    local allTables = {}
-    
-    local function addTable(t)
-        if type(t) ~= "table" or seen[t] then return end
-        seen[t] = true
-        table.insert(allTables, t)
+    local all = {}
+    local function add(t)
+        if type(t) == "table" and not seen[t] then
+            seen[t] = true
+            all[#all+1] = t
+        end
     end
     
-    -- getgc(true) — all GC objects including tables
-    pcall(function()
-        if getgc then
-            for _, obj in pairs(getgc(true)) do
-                addTable(obj)
-            end
-        end
-    end)
+    -- Add all from every list
+    for _, list in ipairs(tableLists) do
+        for _, t in ipairs(list) do add(t) end
+    end
     
-    -- debug.getregistry() — upvalues of registered functions
-    pcall(function()
-        if debug and debug.getregistry and getupvalues then
-            for _, v in pairs(debug.getregistry()) do
-                if type(v) == "function" then
-                    pcall(function()
-                        local ups = getupvalues(v)
-                        if type(ups) == "table" then
-                            for _, upv in pairs(ups) do
-                                addTable(upv)
-                            end
-                        end
-                    end)
-                elseif type(v) == "table" then
-                    addTable(v)
-                end
-            end
-        end
-    end)
-    
-    -- getreg() (some executors)
-    pcall(function()
-        if getreg then
-            for _, v in pairs(getreg()) do
-                addTable(v)
-            end
-        end
-    end)
-    
-    -- Also scan one level deep: sub-tables of found tables
-    -- (the module table might be a value inside another table)
-    local firstPass = {}
-    for _, t in ipairs(allTables) do table.insert(firstPass, t) end
-    for _, t in ipairs(firstPass) do
+    -- Expand one level deep
+    local firstPassCount = #all
+    for i = 1, firstPassCount do
         pcall(function()
-            for k, v in pairs(t) do
-                if type(v) == "table" and type(k) == "string" then
-                    addTable(v)
-                end
+            for k, v in pairs(all[i]) do
+                if type(v) == "table" and type(k) == "string" then add(v) end
             end
         end)
     end
     
-    return allTables
+    return all
 end
 
 -- ============================================================
--- STRATEGY 2: Build synthetic gameAPI from individual modules
+-- BUILD SYNTHETIC API from individual module signatures
 -- ============================================================
 local function buildSyntheticAPI(allTables)
     local synthetic = {}
     local found = {}
-    
     for _, sig in ipairs(MODULE_SIGNATURES) do
         local moduleName = sig[1]
-        local bestScore = 0
-        local bestTable = nil
-        
+        local bestScore, bestTable = 0, nil
         for _, tbl in ipairs(allTables) do
-            -- Skip tables we've already assigned to another module
             local alreadyUsed = false
             for _, assigned in pairs(found) do
                 if assigned == tbl then alreadyUsed = true; break end
@@ -310,126 +611,99 @@ local function buildSyntheticAPI(allTables)
             if not alreadyUsed then
                 local score = matchSignature(tbl, sig)
                 if score > bestScore then
-                    bestScore = score
-                    bestTable = tbl
+                    bestScore = score; bestTable = tbl
                 end
             end
         end
-        
         if bestTable and bestScore > 0 then
             synthetic[moduleName] = bestTable
             found[moduleName] = bestTable
-            log("API", "  Found module '" .. moduleName .. "' (score " .. bestScore .. ")")
+            log("API", "  Sig match: '" .. moduleName .. "' score=" .. bestScore)
         end
     end
-    
     return synthetic, found
 end
 
 -- ============================================================
--- STRATEGY 3: Require ReplicatedStorage modules
+-- DIAGNOSTIC DUMP — shows everything found
 -- ============================================================
-local function scanReplicatedStorage(allTables)
-    pcall(function()
-        local RS = game:GetService("ReplicatedStorage")
-        if not RS then return end
-        for _, child in pairs(RS:GetDescendants()) do
-            if child:IsA("ModuleScript") then
-                pcall(function()
-                    local mod = require(child)
-                    if type(mod) == "table" then
-                        table.insert(allTables, mod)
-                    end
-                end)
-            end
-        end
-    end)
-end
-
--- ============================================================
--- DIAGNOSTIC DUMP (much more aggressive — threshold of 1 table)
--- ============================================================
-local function dumpCandidateTables(allTables)
-    log("DIAG", "========== DUMPING ALL INTERESTING TABLES ==========")
+local function dumpDiagnostic(allTables)
+    log("DIAG", "=== DIAGNOSTIC DUMP (" .. #allTables .. " tables total) ===")
     local candidates = {}
     for _, obj in ipairs(allTables) do
         pcall(function()
-            local strKeys = {}
-            local funcCount, tableCount = 0, 0
+            local keys = {}
+            local fc, tc = 0, 0
             for k, v in pairs(obj) do
                 if type(k) == "string" then
-                    table.insert(strKeys, k)
-                    if type(v) == "function" then funcCount = funcCount + 1 end
-                    if type(v) == "table" then tableCount = tableCount + 1 end
+                    keys[#keys+1] = k
+                    if type(v) == "function" then fc = fc + 1 end
+                    if type(v) == "table" then tc = tc + 1 end
                 end
-                if #strKeys > 30 then break end
+                if #keys > 40 then break end
             end
-            -- Show ANY table with 2+ string keys (one of which is a table or function)
-            if #strKeys >= 2 and (funcCount >= 1 or tableCount >= 1) then
-                table.insert(candidates, {keys = strKeys, funcs = funcCount, tables = tableCount})
+            if #keys >= 1 then
+                candidates[#candidates+1] = {keys = keys, f = fc, t = tc}
             end
         end)
     end
-    
-    log("DIAG", "Found " .. #candidates .. " tables with 2+ string keys")
-    -- Sort by most sub-tables first
-    table.sort(candidates, function(a, b) return (a.tables + a.funcs) > (b.tables + b.funcs) end)
+    table.sort(candidates, function(a, b) return (#a.keys) > (#b.keys) end)
+    log("DIAG", #candidates .. " tables with string keys")
     for i, c in ipairs(candidates) do
-        if i > 30 then log("DIAG", "... (" .. (#candidates - 30) .. " more)"); break end
+        if i > 40 then log("DIAG", "... +" .. (#candidates - 40) .. " more"); break end
         table.sort(c.keys)
-        local keyStr = table.concat(c.keys, ", ")
-        if #keyStr > 350 then keyStr = keyStr:sub(1, 350) .. "..." end
-        log("DIAG", string.format("  #%d [%df %dt]: %s", i, c.funcs, c.tables, keyStr))
+        local ks = table.concat(c.keys, ", ")
+        if #ks > 400 then ks = ks:sub(1, 400) .. "..." end
+        log("DIAG", string.format("  #%d [%df %dt %dk]: %s", i, c.f, c.t, #c.keys, ks))
     end
-    log("DIAG", "========== END DUMP ==========")
-    log("DIAG", "Please share the output above so LumiWare can be updated.")
+    log("DIAG", "=== END DUMP === Please share output above.")
 end
 
 -- ============================================================
 -- MAIN DISCOVERY LOOP
 -- ============================================================
-
--- Helper: safely get a key from gameAPI, trying known names + variants
-local function apiGet(primaryKey, ...)
-    if not gameAPI then return nil end
-    local val = rawget(gameAPI, primaryKey)
-    if val then return val end
-    val = rawget(gameAPI, primaryKey:sub(1,1):lower() .. primaryKey:sub(2))
-    if val then return val end
-    for _, variant in ipairs({...}) do
-        val = rawget(gameAPI, variant)
-        if val then return val end
-    end
-    return nil
-end
-
 task.spawn(function()
     local attempts = 0
     local diagnosticDone = false
-    local rsScanned = false
     
     while not gameAPI do
         attempts = attempts + 1
         
-        -- Gather all scannable tables
-        local allTables = gatherAllTables()
+        -- On each attempt, gather tables from progressively more sources
+        local sources = {}
         
-        -- On attempt 3+, also scan ReplicatedStorage modules
-        if attempts >= 3 and not rsScanned then
-            rsScanned = true
-            scanReplicatedStorage(allTables)
-            log("API", "Added ReplicatedStorage modules to scan pool")
+        -- Always try these
+        sources[#sources+1] = gatherTablesFromGC()
+        sources[#sources+1] = gatherTablesFromRegistry()
+        sources[#sources+1] = gatherTablesFromGetreg()
+        
+        -- From attempt 2+: try connections and upvalues
+        if attempts >= 2 then
+            sources[#sources+1] = gatherTablesFromConnections()
+            sources[#sources+1] = gatherTablesFromUpvalues()
         end
         
-        -- STRATEGY 1: Look for the classic shared table (rawget Utilities)
+        -- From attempt 3+: try require and env
+        if attempts >= 3 then
+            sources[#sources+1] = gatherTablesFromRequire()
+            sources[#sources+1] = gatherTablesFromEnv()
+            sources[#sources+1] = gatherTablesFromScripts()
+        end
+        
+        -- Deduplicate and expand
+        local allTables = deduplicateAndExpand(sources)
+        if attempts <= 3 or attempts % 10 == 0 then
+            log("API", "Attempt " .. attempts .. ": " .. #allTables .. " unique tables to scan")
+        end
+        
+        -- STRATEGY 1: Classic shared table (rawget Utilities)
         for _, t in ipairs(allTables) do
             pcall(function()
                 if rawget(t, "Utilities") and type(rawget(t, "Utilities")) == "table" then
-                    -- Verify it has at least one more known module
-                    for _, checkKey in ipairs({"Battle", "Network", "Menu", "DataManager", "BattleGui"}) do
-                        if rawget(t, checkKey) then
+                    for _, ck in ipairs({"Battle", "Network", "Menu", "DataManager", "BattleGui"}) do
+                        if rawget(t, ck) then
                             gameAPI = t
-                            log("API", "gameAPI found via Utilities key! (classic shared table)")
+                            log("API", "Found shared table via Utilities key!")
                             return
                         end
                     end
@@ -438,83 +712,70 @@ task.spawn(function()
             if gameAPI then break end
         end
         
-        -- STRATEGY 2: Scoring-based (flexible key names)
+        -- STRATEGY 2: Scoring-based
         if not gameAPI then
             local bestScore, bestTable, bestKeys = 0, nil, {}
             for _, t in ipairs(allTables) do
-                local score, matched = scoreTableAsShared(t)
+                local score, matched = scoreSharedTable(t)
                 if score > bestScore then
-                    bestScore = score
-                    bestTable = t
-                    bestKeys = matched
+                    bestScore = score; bestTable = t; bestKeys = matched
                 end
             end
-            -- Threshold: need at least 15 on first attempts, then lower
-            local threshold = 15
-            if attempts >= 5 then threshold = 8 end
-            if attempts >= 10 then threshold = 3 end
+            local threshold = (attempts < 5 and 15) or (attempts < 10 and 8) or 3
             if bestScore >= threshold then
                 gameAPI = bestTable
-                log("API", string.format("gameAPI found via scoring! Score: %d, Keys: [%s]",
+                log("API", string.format("Shared table via scoring! Score=%d Keys=[%s]",
                     bestScore, table.concat(bestKeys, ", ")))
             end
         end
         
-        -- STRATEGY 3: Build SYNTHETIC gameAPI from individual modules
+        -- STRATEGY 3: Build synthetic API
         if not gameAPI and attempts >= 3 then
-            log("API", "No shared table found. Attempting synthetic gameAPI build...")
             local synthetic, found = buildSyntheticAPI(allTables)
-            
-            -- Need at least 3 core modules to consider it viable
             local coreCount = 0
-            for _, coreName in ipairs({"Battle", "Network", "Menu", "DataManager", "BattleGui"}) do
-                if synthetic[coreName] then coreCount = coreCount + 1 end
+            for _, cn in ipairs({"Battle", "Network", "Menu", "DataManager", "BattleGui"}) do
+                if synthetic[cn] then coreCount = coreCount + 1 end
             end
-            local totalFound = 0
-            for _ in pairs(found) do totalFound = totalFound + 1 end
+            local total = 0
+            for _ in pairs(found) do total = total + 1 end
             
-            if coreCount >= 2 or totalFound >= 4 then
+            if coreCount >= 2 or total >= 4 then
                 gameAPI = synthetic
-                log("API", string.format("Synthetic gameAPI built! %d modules found (%d core)",
-                    totalFound, coreCount))
-            elseif totalFound > 0 and attempts >= 8 then
-                -- Desperate: accept even partial match after many attempts
+                log("API", string.format("Synthetic gameAPI! %d modules (%d core)", total, coreCount))
+            elseif total > 0 and attempts >= 8 then
                 gameAPI = synthetic
-                log("API", string.format("Partial synthetic gameAPI accepted (%d modules) after %d attempts",
-                    totalFound, attempts))
-            else
-                log("API", string.format("Synthetic build found %d modules (%d core) — not enough yet",
-                    totalFound, coreCount))
+                log("API", string.format("Partial synthetic accepted: %d modules after %d attempts", total, attempts))
+            elseif attempts <= 5 or attempts % 10 == 0 then
+                log("API", string.format("Synthetic: %d modules (%d core) — not enough", total, coreCount))
             end
         end
         
+        -- Diagnostic dump on attempt 5
+        if not gameAPI and attempts == 5 and not diagnosticDone then
+            diagnosticDone = true
+            dumpDiagnostic(allTables)
+        end
+        
         if not gameAPI then
-            -- Diagnostic dump on attempt 5
-            if attempts == 5 and not diagnosticDone then
-                diagnosticDone = true
-                dumpCandidateTables(allTables)
-            end
             if attempts % 10 == 0 then
-                log("API", "Still searching for gameAPI... (attempt " .. attempts .. ")")
+                log("API", "Still searching... attempt " .. attempts)
             end
             task.wait(1)
         end
     end
     
     -- Log what we found
-    local found = {}
+    local foundKeys = {}
     pcall(function()
         for k, v in pairs(gameAPI) do
-            if type(k) == "string" then
-                table.insert(found, k .. "(" .. type(v) .. ")")
-            end
+            if type(k) == "string" then foundKeys[#foundKeys+1] = k .. "(" .. type(v) .. ")" end
         end
     end)
-    table.sort(found)
-    log("API", "gameAPI keys: " .. table.concat(found, ", "))
+    table.sort(foundKeys)
+    log("API", "gameAPI modules: " .. table.concat(foundKeys, ", "))
     
     -- ============================================================
-    -- INSTALL HOOKS (each in its own pcall)
+    -- INSTALL HOOKS
     -- ============================================================
     local Battle = gameAPI.Battle
     local DataMgr = gameAPI.DataManager
@@ -523,78 +784,51 @@ task.spawn(function()
     local MenuMod = gameAPI.Menu
     local MC = gameAPI.MasterControl
     
-    -- Hook setupScene
     pcall(function()
         if Battle and Battle.setupScene then
             local old = Battle.setupScene
-            Battle.setupScene = function(...)
-                setThreadContext(2)
-                return old(...)
-            end
+            Battle.setupScene = function(...) setThreadContext(2); return old(...) end
             log("HOOK", "Battle.setupScene hooked")
         end
     end)
-    
-    -- Hook loadModule
     pcall(function()
         if DataMgr and DataMgr.loadModule then
             local old = DataMgr.loadModule
-            DataMgr.loadModule = function(...)
-                setThreadContext(2)
-                return old(...)
-            end
+            DataMgr.loadModule = function(...) setThreadContext(2); return old(...) end
             log("HOOK", "DataManager.loadModule hooked")
         end
     end)
-    
-    -- Hook loadChunk
     pcall(function()
         if DataMgr and DataMgr.loadChunk then
             local old = DataMgr.loadChunk
-            DataMgr.loadChunk = function(...)
-                setThreadContext(2)
-                return old(...)
-            end
+            DataMgr.loadChunk = function(...) setThreadContext(2); return old(...) end
             log("HOOK", "DataManager.loadChunk hooked")
         end
     end)
-    
-    -- Hook doTrainerBattle
     pcall(function()
         if Battle and Battle.doTrainerBattle then
             local old = Battle.doTrainerBattle
             Battle.doTrainerBattle = function(...)
                 if config.autoHealEnabled and Net then
-                    local maxWait = 60
-                    local start = tick()
+                    local maxWait = 60; local start = tick()
                     while (tick() - start) < maxWait do
-                        local ok, fullHP = pcall(function()
-                            return Net:get("PDS", "areFullHealth")
-                        end)
-                        if ok and fullHP then break end
+                        local ok2, fullHP = pcall(function() return Net:get("PDS", "areFullHealth") end)
+                        if ok2 and fullHP then break end
                         task.wait(0.5)
                     end
                 end
-                setThreadContext(2)
-                return old(...)
+                setThreadContext(2); return old(...)
             end
             log("HOOK", "Battle.doTrainerBattle hooked")
         end
     end)
-    
-    -- Hook switchMonster
     pcall(function()
         if BGui and BGui.switchMonster then
             local old = BGui.switchMonster
-            BGui.switchMonster = function(...)
-                setThreadContext(2)
-                return old(...)
-            end
+            BGui.switchMonster = function(...) setThreadContext(2); return old(...) end
             log("HOOK", "BattleGui.switchMonster hooked")
         end
     end)
-    
-    -- Suppress mastery progress
     pcall(function()
         if MenuMod and MenuMod.mastery and MenuMod.mastery.showProgressUpdate then
             local old = MenuMod.mastery.showProgressUpdate
@@ -605,8 +839,6 @@ task.spawn(function()
             log("HOOK", "Menu.mastery.showProgressUpdate hooked")
         end
     end)
-    
-    -- Remove unstuck cooldown
     pcall(function()
         if MenuMod and MenuMod.options then
             MenuMod.options.resetLastUnstuckTick = function() end
@@ -614,16 +846,14 @@ task.spawn(function()
         end
     end)
     
-    -- FOV fix loop
+    -- FOV fix
     task.spawn(function()
         while task.wait(0.5) do
             pcall(function()
                 if MC and MC.WalkEnabled then
                     local inBattle = false
                     pcall(function() inBattle = Battle and Battle.currentBattle ~= nil end)
-                    if not inBattle then
-                        workspace.Camera.FieldOfView = 70
-                    end
+                    if not inBattle then workspace.Camera.FieldOfView = 70 end
                 end
             end)
         end
